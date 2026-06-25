@@ -57,6 +57,11 @@ public:
 
 public:
     float time_unit() const;
+    // Name + Liberty-cap accessors for the GangSTA signoff comparison (Mode B): a host builds the
+    // name-keyed parasitics it hands to gangsta from the current per-pin load and these.
+    const std::vector<std::string>& pin_names() const;
+    const std::vector<std::string>& net_names() const;
+    torch::Tensor pin_capacitance() const;  // per-pin Liberty input capacitance (gtdb cap unit)
 
 public:
     int num_pins, num_arcs, num_timings, num_tests, num_POs, total_num_fanouts;

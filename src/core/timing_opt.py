@@ -1,3 +1,4 @@
+import logging
 import torch
 from cpp_to_py import gputimer, wirelength_timing_cuda
 from src.param_scheduler import MetricRecorder
@@ -80,7 +81,19 @@ class GPUTimer():
         self.global_weight = 1
 
         self.target_wns = 0
-        
+
+        # --- GangSTA signoff timer (Mode B differential comparison; --signoff_timer) ---
+        # Reads the static design once and re-times under host-supplied parasitics so its WNS/TNS can be
+        # logged beside the built-in GPU timer's. Entirely opt-in: when off (default) nothing here runs,
+        # so the existing timing-driven flow is byte-for-byte unchanged.
+        self.params = params
+        self.signoff_mode = getattr(args, "signoff_timer", "gputimer")
+        self.signoff_parasitics = getattr(args, "signoff_parasitics", "none")
+        self.gangsta = None
+        self.gangsta_err = ""
+        if self.signoff_mode in ("gangsta", "both"):
+            self._setup_gangsta_signoff(params)
+
     def update_timing(self, node_pos):
         node_lpos = (node_pos.detach() - self.node_size / 2).to(self.data.device)
         self.conn_node_lpos = torch.cat([
@@ -132,6 +145,110 @@ class GPUTimer():
         tns_late = (tns_late.item() * (time_unit * 1e9))
         self.push_metric(-wns_late, -tns_late)
         return wns_early, tns_early, wns_late, tns_late
+
+    # ===== GangSTA signoff comparison (Mode B) =================================================
+    def _setup_gangsta_signoff(self, params):
+        log = logging.getLogger()
+        if not gputimer.GangstaSignoff.available():
+            self.gangsta_err = "Xplace was built without the gangsta library"
+            log.warning("signoff_timer=%s requested but GangSTA is unavailable (%s); reporting "
+                        "gputimer only" % (self.signoff_mode, self.gangsta_err))
+            return
+        need = ["verilog", "early_lib", "late_lib", "sdc"]
+        missing = [k for k in need if not params.get(k)]
+        if missing:
+            self.gangsta_err = "design is missing inputs GangSTA needs: %s" % missing
+            log.warning("signoff_timer=%s: %s; reporting gputimer only"
+                        % (self.signoff_mode, self.gangsta_err))
+            return
+        g = gputimer.GangstaSignoff()
+        ok = g.build(verilog=params["verilog"], early_lib=params["early_lib"],
+                     late_lib=params["late_lib"], sdc=params["sdc"])
+        if not ok:
+            self.gangsta_err = g.error()
+            log.warning("GangSTA build failed (%s); reporting gputimer only" % self.gangsta_err)
+            return
+        self.gangsta = g
+        log.info("GangSTA signoff timer ready (parasitics=%s)" % self.signoff_parasitics)
+
+    def _build_signoff_parasitics(self):
+        # Returns the 9 CSR arrays gputimer.GangstaSignoff.report() expects.
+        #   'none' -> empty: GangSTA uses its own lumped Liberty-cap model (the validated path).
+        #   'load' -> match the GPU timer's per-net capacitive load. WIRE cap only (GangSTA adds each
+        #             sink's Liberty pin cap itself, so we must not include pin caps -> no double count).
+        #             EXPERIMENTAL: cap-unit alignment between the two engines is not yet calibrated, so
+        #             absolute numbers may need a scale; the load *ratios* across nets are faithful.
+        empty = ([], [], [0], [], [], [0], [], [], [])
+        if self.signoff_parasitics != "load":
+            return empty
+        try:
+            pin_load = self.timer.report_pin_load().detach().float().cpu()
+            if pin_load.dim() > 1:
+                pin_load = pin_load.reshape(pin_load.size(0), -1).max(dim=1).values
+            pin_cap = self.timer.pin_capacitance().detach().float().cpu()
+            he = self.data.hyperedge_list.long().cpu()
+            he_end = self.data.hyperedge_list_end.long().cpu()
+            net_mask = self.data.net_mask.cpu()
+            net_names, net_total = [], []
+            cap_start, cap_node, cap_val = [0], [], []
+            res_start, res_a, res_b, res_val = [0], [], [], []
+            start = 0
+            for net_id in range(len(he_end)):
+                end = int(he_end[net_id])
+                pins = he[start:end].tolist()
+                start = end
+                if net_id >= len(net_mask) or not bool(net_mask[net_id]) or len(pins) == 0:
+                    continue
+                loads = pin_load[pins]
+                driver_local = int(torch.argmax(loads))
+                net_load = float(loads[driver_local])
+                sink_lib = sum(float(pin_cap[p]) for i, p in enumerate(pins) if i != driver_local)
+                wire_cap = max(net_load - sink_lib, 0.0)
+                root = self.pin_names[pins[driver_local]]
+                net_names.append(self.net_names[net_id])
+                net_total.append(net_load)
+                # Lump the net's wire cap at the driver node; GangSTA adds each sink's Liberty pin cap.
+                cap_node.append(root)
+                cap_val.append(wire_cap)
+                cap_start.append(len(cap_val))
+                # 0-ohm resistors root->each sink so the per-net RC graph is a connected tree (avoids a
+                # "not a tree" warning); zero resistance => zero interconnect delay (matched-load mode).
+                for i, p in enumerate(pins):
+                    if i == driver_local:
+                        continue
+                    res_a.append(root)
+                    res_b.append(self.pin_names[p])
+                    res_val.append(0.0)
+                res_start.append(len(res_val))
+            return net_names, net_total, cap_start, cap_node, cap_val, res_start, res_a, res_b, res_val
+        except Exception as e:  # never let signoff extraction disturb the placement loop
+            logging.getLogger().warning("signoff_parasitics=load extraction failed (%s); using 'none'" % e)
+            return empty
+
+    def report_gangsta_signoff(self):
+        """GangSTA WNS/TNS as a dict (raw gangsta time units), or None if unavailable. Never raises."""
+        if self.gangsta is None:
+            return None
+        try:
+            we, te, wl, tl, valid = self.gangsta.report(*self._build_signoff_parasitics())
+            if not valid:
+                return None
+            return {"wns_early": we, "tns_early": te, "wns_late": wl, "tns_late": tl}
+        except Exception as e:
+            logging.getLogger().warning("GangSTA signoff report failed: %s" % e)
+            return None
+
+    def log_gangsta_signoff(self, logger):
+        """Log GangSTA's WNS/TNS for side-by-side comparison with the GPU timer at a signoff milestone."""
+        if self.signoff_mode not in ("gangsta", "both"):
+            return
+        gg = self.report_gangsta_signoff()
+        if gg is None:
+            logger.info("[signoff] gangsta : unavailable (%s)" % (self.gangsta_err or "no constrained endpoints"))
+            return
+        logger.info("[signoff] gangsta : late WNS/TNS: %.4f/%.4f | early WNS/TNS: %.4f/%.4f "
+                    "(gangsta time units, parasitics=%s)"
+                    % (gg["wns_late"], gg["tns_late"], gg["wns_early"], gg["tns_early"], self.signoff_parasitics))
 
     def report_pin_slack(self):
         self.pin_slack = self.timer.report_pin_slack()

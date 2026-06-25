@@ -87,6 +87,16 @@ torch::Tensor GPUTimer::report_endpoint_slack() { return endpoint_slacks; }
 torch::Tensor GPUTimer::endpoints_index(){ return timing_raw_db.endpoints_id;}
 float GPUTimer::time_unit() const { return gtdb.time_unit; }
 
+const std::vector<std::string>& GPUTimer::pin_names() const { return gtdb.pin_names; }
+const std::vector<std::string>& GPUTimer::net_names() const { return gtdb.net_names; }
+torch::Tensor GPUTimer::pin_capacitance() const {
+    // gtdb.pin_capacitance is a host float vector; copy into an owned CPU tensor for Python.
+    const auto n = static_cast<long>(gtdb.pin_capacitance.size());
+    return torch::from_blob(const_cast<float*>(gtdb.pin_capacitance.data()), {n},
+                            torch::TensorOptions().dtype(torch::kFloat32))
+        .clone();
+}
+
 float GPUTimer::report_wns(int el) {
     auto ep_slacks = torch::nan_to_num(endpoint_slacks, FLT_MAX);
     return torch::min(ep_slacks.index({"...", torch::indexing::Slice(2 * el, 2 * (el + 1))})).item<float>();

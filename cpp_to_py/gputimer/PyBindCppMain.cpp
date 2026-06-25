@@ -4,6 +4,7 @@
 #include "io_parser/gp/GPDatabase.h"
 #include "gputimer/db/GTDatabase.h"
 #include "gputimer/core/GPUTimer.h"
+#include "gputimer/core/gangsta_signoff.h"
 
 #include <flute.hpp>
 using namespace Flute;
@@ -64,6 +65,44 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         .def("report_K_path", &gt::GPUTimer::report_K_path, py::return_value_policy::copy)
         .def("report_criticality", &gt::GPUTimer::report_criticality, py::return_value_policy::copy)
         .def("report_criticality_threshold", &gt::GPUTimer::report_criticality_threshold, py::return_value_policy::copy)
+        .def("pin_names", &gt::GPUTimer::pin_names, py::return_value_policy::copy)
+        .def("net_names", &gt::GPUTimer::net_names, py::return_value_policy::copy)
+        .def("pin_capacitance", &gt::GPUTimer::pin_capacitance, py::return_value_policy::move)
+        ;
+
+    // GangSTA signoff timer (Mode B differential comparison). Reads the static design once, then
+    // re-times under host-supplied per-net parasitics (no SPEF file) and reports WNS/TNS per corner.
+    pybind11::class_<gt::GangstaSignoff, std::shared_ptr<gt::GangstaSignoff>>(m, "GangstaSignoff")
+        .def(pybind11::init<>())
+        .def_static("available", &gt::GangstaSignoff::available)
+        .def("build", &gt::GangstaSignoff::build,
+             py::arg("verilog"), py::arg("early_lib"), py::arg("late_lib"), py::arg("sdc"))
+        .def("is_built", &gt::GangstaSignoff::is_built)
+        .def("error", &gt::GangstaSignoff::error)
+        // Inject name-keyed CSR parasitics and report (wns_early, tns_early, wns_late, tns_late, valid).
+        // Caps are WIRE caps in ff, resistors in kohm (gangsta adds each sink's Liberty pin cap itself).
+        .def("report",
+             [](gt::GangstaSignoff& s, std::vector<std::string> net_names,
+                std::vector<float> net_total_cap, std::vector<uint32_t> cap_start,
+                std::vector<std::string> cap_node, std::vector<float> cap_val,
+                std::vector<uint32_t> res_start, std::vector<std::string> res_a,
+                std::vector<std::string> res_b, std::vector<float> res_val) {
+                 gt::GangstaSignoff::Parasitics p;
+                 p.net_names = std::move(net_names);
+                 p.net_total_cap = std::move(net_total_cap);
+                 p.cap_start = std::move(cap_start);
+                 p.cap_node = std::move(cap_node);
+                 p.cap_val = std::move(cap_val);
+                 p.res_start = std::move(res_start);
+                 p.res_a = std::move(res_a);
+                 p.res_b = std::move(res_b);
+                 p.res_val = std::move(res_val);
+                 const auto r = s.report(p);
+                 return std::make_tuple(r.wns_early, r.tns_early, r.wns_late, r.tns_late, r.valid);
+             },
+             py::arg("net_names"), py::arg("net_total_cap"), py::arg("cap_start"),
+             py::arg("cap_node"), py::arg("cap_val"), py::arg("res_start"), py::arg("res_a"),
+             py::arg("res_b"), py::arg("res_val"))
         ;
     pybind11::class_<gt::TimingTorchRawDB, std::shared_ptr<gt::TimingTorchRawDB>>(m, "TimingTorchRawDB")
         .def(pybind11::init<torch::Tensor,

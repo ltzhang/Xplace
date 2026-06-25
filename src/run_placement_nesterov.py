@@ -451,6 +451,9 @@ def run_placement_main_nesterov(args, logger):
             gputimer.update_timing_eval(node_pos)
             wns_early, tns_early, wns_late, tns_late = gputimer.report_timing_slack()
             logger.info("early WNS/TNS: %.4f/%.4f (ns) | late WNS/TNS: %.4f/%.4f (ns)" % (wns_early, tns_early, wns_late, tns_late))
+            # Optional: report the external GangSTA engine's WNS/TNS at this signoff milestone for
+            # a side-by-side timer comparison (--signoff_timer gangsta|both). No-op by default.
+            gputimer.log_gangsta_signoff(logger)
             return wns_early, tns_early, wns_late, tns_late
             
     # global placement

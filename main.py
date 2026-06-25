@@ -60,6 +60,8 @@ def get_option():
     parser.add_argument('--decay_boost', type=float, default=3, help='dynamic decay boost factor')
     parser.add_argument('--wire_resistance_per_micron', type=float, default=2.535, help='unit wire resistance, normalized across all layers')
     parser.add_argument('--wire_capacitance_per_micron', type=float, default=0.16e-15, help='unit wire capacitance, normalized across all layers')
+    parser.add_argument('--signoff_timer', type=str, default="gputimer", choices=["gputimer", "gangsta", "both"], help='which STA engine reports signoff WNS/TNS at timing milestones: the built-in GPU timer, the external GangSTA engine, or both side-by-side for comparison')
+    parser.add_argument('--signoff_parasitics', type=str, default="none", choices=["none", "load"], help="parasitics handed to GangSTA: 'none' = its own lumped Liberty-cap model; 'load' = match the GPU timer's per-net capacitive load (experimental)")
 
     # detailed placement and evaluation
     parser.add_argument('--legalization', type=str2bool, default=True, help='perform lg') 
