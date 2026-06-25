@@ -151,7 +151,7 @@ inline size_t cuda_get_graph_num_nodes(cudaGraph_t graph) {
 inline size_t cuda_get_graph_num_edges(cudaGraph_t graph) {
   size_t num_edges;
   TF_CHECK_CUDA(
-    cudaGraphGetEdges(graph, nullptr, nullptr, &num_edges), 
+    cudaGraphGetEdges(graph, nullptr, nullptr, nullptr, &num_edges),
     "failed to get native graph edges"
   );
   return num_edges;
@@ -191,7 +191,7 @@ cuda_get_graph_edges(cudaGraph_t graph) {
   size_t num_edges = cuda_get_graph_num_edges(graph);
   std::vector<cudaGraphNode_t> froms(num_edges), tos(num_edges);
   TF_CHECK_CUDA(
-    cudaGraphGetEdges(graph, froms.data(), tos.data(), &num_edges),
+    cudaGraphGetEdges(graph, froms.data(), tos.data(), nullptr, &num_edges),
     "failed to get native graph edges"
   );
   std::vector<std::pair<cudaGraphNode_t, cudaGraphNode_t>> edges(num_edges);
@@ -530,7 +530,7 @@ inline void cudaNode::_precede(cudaNode* v) {
   if(_handle.index() != cudaNode::CAPTURE) {
     TF_CHECK_CUDA(
       cudaGraphAddDependencies(
-        _graph._native_handle, &_native_handle, &v->_native_handle, 1
+        _graph._native_handle, &_native_handle, &v->_native_handle, nullptr, 1
       ),
       "failed to add a preceding link ", this, "->", v
     );
