@@ -71,3 +71,28 @@ Validated:
 Pending (requires the ICCAD-2015 dataset, not in the local corpus — `data/raw` is empty and the
 ispd2015 designs ship no `*_Early/_Late.lib`/`.sdc`): a full `--timing_opt --signoff_timer both`
 placement run on a real timing design, and `load`-mode cap-unit calibration.
+
+## Mode A (GangSTA as the inner-loop timer) — status
+
+Mode A would replace the GPU timer *inside* the gradient loop (drive `timing_pin_weight` from
+GangSTA's slacks). The timer does **not** need to be differentiable — Xplace uses net-weighting, so
+the timer is a non-differentiable oracle; `wirelength_timing_cuda` supplies the gradient.
+
+All **gangsta-side primitives** for this are implemented and unit-validated (in the gangsta repo):
+
+- per-iteration RC injection with a **lean RC-only refresh** — `gangsta_set_parasitics_inmem`
+  (`parasitics_inject_test`);
+- one-call **bulk readback** of per-pin slack/arrival/slew/required as `[num_pins,4]` —
+  `gangsta_read_pin_timing` (`bulk_readback_test`);
+- **pin-id↔name** map for aligning gangsta's pin order to Xplace's — `gangsta_num_pins` /
+  `gangsta_pin_name`;
+- WNS/TNS. Per-pin **criticality** is host-computable from the bulk slack array (no API needed) for
+  a first inner loop; a path-visit criticality is a later refinement.
+
+Remaining (host-side, **blocked on the ICCAD-2015 dataset** for validation): a Python timer mirroring
+the `GPUTimer` socket (`update_timing` → inject RC + update; `report_pin_slack` → bulk readback;
+`step` → criticality from slack) behind the `--signoff_timer` switch, plus the perf reality that a CPU
+full re-time per iteration is far slower than the GPU timer on large designs (GangSTA's GPU backend is
+correct but not yet fast — ADR-0014/0015). Building this gradient-loop replacement without a placeable
+timing design to validate against would risk silently wrong placements, so it is staged here rather
+than shipped unverified.
