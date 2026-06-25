@@ -98,3 +98,31 @@ This is the heart of Xplace and where most placement-algorithm work happens. The
 ## Conventions
 - New placement parameters are added as flags in `main.py:get_option()` and threaded through `args`; there is no separate config system.
 - Cost-function modules follow the pattern of subclassing `torch.autograd.Function` to bridge a CUDA forward/backward kernel into the autograd graph — mirror an existing one in `src/core/` when adding a new objective.
+
+## GangSTA signoff timer (external STA comparison — `--signoff_timer`)
+
+The [GangSTA](../../) STA engine is linked into the `gputimer` module so its WNS/TNS can be reported
+**beside** Xplace's built-in GPU timer at signoff milestones (post-global-placement / post-detailed-
+placement), for a side-by-side timer comparison on the same placement. GangSTA reads the static design
+once (`.v` + `*_Early/_Late.lib` + `.sdc` — the iccad2015 inputs) and re-times under host-supplied
+parasitics injected **in-memory** via the GangSTA C API (`gangsta_set_parasitics_inmem`, no SPEF file
+round-trip).
+
+- **Flags:** `--signoff_timer {gputimer|gangsta|both}` (default `gputimer` = unchanged legacy behavior;
+  the GangSTA path is fully opt-in and never constructs the engine unless requested) and
+  `--signoff_parasitics {none|load}`.
+- **Code:** adapter `cpp_to_py/gputimer/core/gangsta_signoff.{h,cpp}` (C-API only, torch-free; safe
+  no-op stub when built without GangSTA), bound in `PyBindCppMain.cpp` as `gputimer.GangstaSignoff`;
+  Python wiring in `src/core/timing_opt.py` (`GPUTimer.log_gangsta_signoff`) and
+  `src/run_placement_nesterov.py` (`timing_eval_func`).
+- **Build:** GangSTA must be built first (`libgangsta.a`, PIC); the gputimer CMake auto-detects it
+  (`GANGSTA_ROOT`, prints `ENABLED`/`DISABLED`) — a checkout without GangSTA builds exactly as before.
+  Needs `libtcl8.6`.
+- **⚠️ Validation status — NOT yet run end-to-end on a real timing design.** No iccad2015 dataset is
+  present locally (`data/raw` is empty; the ispd2015 designs ship no `*_Early/_Late.lib`/`.sdc`).
+  What *is* validated: GangSTA's in-memory injection is byte-identical to reading a SPEF (gangsta
+  repo tests); `gputimer.so` links + loads GangSTA; `GangstaSignoff` builds a TAU-2015 design and
+  reports stable WNS/TNS through the Python binding, with non-empty parasitics taking effect. A full
+  `--timing_opt --signoff_timer both` placement run, and `load`-mode cap-unit calibration, **remain
+  to be done once an iccad2015 design is available.** Full details + the Mode-A (inner-loop timer
+  replacement) plan: `cpp_to_py/gputimer/GANGSTA_SIGNOFF.md`.
