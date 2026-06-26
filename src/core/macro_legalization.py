@@ -23,7 +23,7 @@ use_numba_parallel = False
 @nb.jit(cache=True, parallel=use_numba_parallel)
 def check_macro_legality(macro_pos, macro_size, macro_fixed, die_info, check_all=True):
     num_macros = macro_pos.shape[0]
-    # overlap = np.zeros((num_macros, num_macros), dtype=np.bool8)
+    # overlap = np.zeros((num_macros, num_macros), dtype=np.bool_)
     legal = True
     overlaps = []
     for i in nb.prange(num_macros):
@@ -383,8 +383,8 @@ def longest_path_refinement(macro_pos, macro_size, macro_fixed, die_info, die_ll
     # Calcuate x_L, x_R, y_L and y_R
     L = np.full((num_nodes, 2), -np.inf, dtype=dtype)
     R = np.full((num_nodes, 2), np.inf, dtype=dtype)
-    affected_L = np.ones((num_nodes, 2), dtype=np.bool8)
-    affected_R = np.ones((num_nodes, 2), dtype=np.bool8)
+    affected_L = np.ones((num_nodes, 2), dtype=np.bool_)
+    affected_R = np.ones((num_nodes, 2), dtype=np.bool_)
     # Propagate all nodes' L and R
     propagate_L_R(g, macro_pos, macro_fixed, affected_L, affected_R, adj_matrix, weight_matrix, 
         L, R, die_ll, die_ur, s_id, t_id, num_macros)
@@ -799,7 +799,7 @@ def macro_rough_align(macro_pos, macro_size, macro_fixed, die_ll, die_ur, inv_sc
 
     macro_lpos = macro_pos - macro_size / 2
     macro_lpos = np.multiply(macro_lpos, inv_scalar, out=macro_lpos)
-    macro_lpos = np.round_(macro_lpos, out=macro_lpos)
+    macro_lpos = np.round(macro_lpos, out=macro_lpos)
     macro_lpos = np.divide(macro_lpos, inv_scalar, out=macro_lpos)
 
     macro_pos_ = macro_lpos + macro_size / 2

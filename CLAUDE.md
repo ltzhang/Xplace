@@ -20,7 +20,7 @@ make -j40 && make install
 - Requires CMake >= 3.24, GCC >= 7.5, Boost >= 1.56, CUDA >= 11.3, PyTorch >= 1.12, Cairo. A CUDA-capable GPU is required at runtime (`torch.cuda.is_available()` is asserted).
 - Clone with `--recursive`; third-party deps (pybind11, flute, lemon, lefdef, placers) live in `thirdparty/` as submodules/vendored code.
 
-> **Verified toolchain (this workspace):** CUDA 13.2, PyTorch 2.12 (cu132, ABI=1), GCC 13, on an RTX 3080 (compute 8.6), using the venv at `/home/lintaoz/venv-cuda`. Building against CUDA 13 required two source changes that are already applied here: the build is bumped to **C++20** with `CMAKE_CXX_ABI` defaulting to **1** (match PyTorch ≥ 2.x), and `cpp_to_py/gpugr/taskflow/cuda/cuda_graph.hpp`/`cuda_device.hpp` were updated for CUDA 13's API (`cudaGraphGetEdges`/`cudaGraphAddDependencies` gained an `edgeData` argument; `clockRate`/`deviceOverlap`/`kernelExecTimeoutEnabled` were removed). Built cleanly and ran end-to-end on `ispd2005/adaptec1`.
+> **Verified toolchain (this workspace):** CUDA 13.2, PyTorch 2.12 (cu132, ABI=1), GCC 13, on an RTX 3080 (compute 8.6), using the venv at `/home/lintaoz/venv-cuda`. Building against CUDA 13 required two source changes that are already applied here: the build is bumped to **C++20** with `CMAKE_CXX_ABI` defaulting to **1** (match PyTorch ≥ 2.x), and `cpp_to_py/gpugr/taskflow/cuda/cuda_graph.hpp`/`cuda_device.hpp` were updated for CUDA 13's API (`cudaGraphGetEdges`/`cudaGraphAddDependencies` gained an `edgeData` argument; `clockRate`/`deviceOverlap`/`kernelExecTimeoutEnabled` were removed). NumPy 2.x also removed `np.round_`/`np.bool8`, which the mixed-size legalizer (`src/core/macro_legalization.py`) used — replaced with `np.round`/`np.bool_`. Verified end-to-end on GPU across `ispd2005/adaptec1`, `ispd2006/adaptec5`, `mms/adaptec1 --mixed_size`, `iccad2015/superblue1`, `iccad2019/ispd19_test1`.
 
 ### Adding a new C++/CUDA module
 A module must be registered in **three** places: its own `cpp_to_py/<mod>/CMakeLists.txt`, the `add_subdirectory` list in `cpp_to_py/CMakeLists.txt`, and the import list in `cpp_to_py/__init__.py`.
@@ -32,15 +32,29 @@ There is no test suite; the project is exercised by running placement on benchma
 **Benchmark data (shared store).** Data is gitignored. In this workspace it lives in a single shared store one level up — `../benchmarks/<dataset>` — shared with the sibling **DREAMPlace** checkout so each dataset is downloaded only once. It is wired into `data/raw/` as per-dataset symlinks:
 
 ```
-data/raw/ispd2005 -> ../../../benchmarks/ispd2005
-data/raw/ispd2015 -> ../../../benchmarks/ispd2015
-data/raw/ispd2018 -> ../../../benchmarks/ispd2018
-data/raw/ispd2019 -> ../../../benchmarks/ispd2019
+data/raw/ispd2005   -> ../../../benchmarks/ispd2005     # Bookshelf (.aux)
+data/raw/ispd2006   -> ../../../benchmarks/ispd2006     # Bookshelf (.aux)
+data/raw/mms        -> ../../../benchmarks/mms          # Bookshelf mixed-size (.aux)
+data/raw/ispd2015   -> ../../../benchmarks/ispd2015     # LEF/DEF
+data/raw/ispd2018   -> ../../../benchmarks/ispd2018     # LEF/DEF (routing)
+data/raw/ispd2019   -> ../../../benchmarks/ispd2019     # LEF/DEF (routing)
+data/raw/iccad2015  -> ../../../benchmarks/iccad2015    # LEF/DEF + timing (.lib/.sdc) — for --timing_opt
+data/raw/iccad2019  -> ../../../benchmarks/iccad2019    # LEF/DEF (routing)
 ```
 
-Available now: `ispd2005`, `ispd2015`, `ispd2018`, `ispd2019`. `--dataset_root` defaults to `data/raw`, so the symlinks are picked up automatically.
+Available now: `ispd2005`, `ispd2006`, `mms`, `ispd2015`, `ispd2018`, `ispd2019`, `iccad2015`, `iccad2019`. `--dataset_root` defaults to `data/raw`, so the symlinks are picked up automatically. (`ispd2006`, `mms`, `iccad2015`, `iccad2019` were fetched 2026-06-26 from the refreshed OneDrive links upstream added to `data/README.md` — see the download note below.)
 
-`data/download_data.sh` is the original fetch script, but **do not run it as-is**: it begins with `rm -rf raw/`, which would delete the shared-store symlinks, and most of its OneDrive links (`ispd2005`, `ispd2006`, `mms`, `ispd2015`, `iccad2015`, `iccad2019`) **expired Jan 2026** (HTTP 401). Only the direct ispd.cc links (`ispd2018`, `ispd2019`) still work. The routability-only `ispd2015_fix` / `ispd2019_no_fence` sets are generated from `ispd2015` / `ispd2019` by `fix_ispd2015_route.py` / `remove_fence_in_ispd19_test5.py` (pure Python — no Innovus needed).
+`data/download_data.sh` (synced with upstream 2026-06-26) is now **symlink-safe**: it no longer starts with `rm -rf raw/`, does `mkdir -p raw`, and **skips any `raw/<dataset>` that already exists** — so our shared-store symlinks (`ispd2005`, `ispd2015`, `ispd2018`, `ispd2019`) are left untouched. The OneDrive auto-download links are gone; instead the fresh OneDrive share links live in `data/README.md` (`ispd2005`, `ispd2006`, `mms`, `ispd2015`, `iccad2015`, `iccad2019`), and you place the `.tar.gz` files in `data/` before running the script (its skip-guards then extract them). The direct `ispd.cc` links (`ispd2018`, `ispd2019`) download non-interactively.
+
+**Downloading the OneDrive sets headlessly** (no browser needed — the README's `1drv.ms/u/c/<driveid>/<TOKEN>?e=...` links do *not* resolve to a file via curl, but the underlying SharePoint endpoint does). Take the `IQ...` `<TOKEN>` from each link and fetch:
+```bash
+curl -A "Mozilla/5.0" -L \
+  "https://my.microsoftpersonalcontent.com/personal/2c6e2bbdaffc31ad/_layouts/15/download.aspx?share=<TOKEN>" \
+  -o <dataset>.tar.gz
+```
+(`2c6e2bbdaffc31ad` is the maintainer's drive id, also visible in the `1drv.ms` path.) This is how `ispd2006`/`mms`/`iccad2015`/`iccad2019` were fetched on 2026-06-26.
+
+Caveats when running it here: (1) it runs `fix_ispd2015_route.py` unconditionally, generating the routability-only `ispd2015_fix` set (and `remove_fence_in_ispd19_test5.py` → `ispd2019_no_fence`) — both are pure Python, no Innovus needed; (2) the `ispd2018`/`ispd2019` blocks always re-`wget` from ispd.cc into `raw/ispd20xx/` (no skip guard), and since those are symlinks the data would be re-fetched into the shared store — comment out those blocks if you only need the OneDrive sets. To add just the missing sets, drop their tarballs in `data/` and the skip-guards handle the rest.
 
 Main entry point is `main.py`. All behavior is controlled by CLI flags defined in `get_option()` (the authoritative parameter reference).
 
