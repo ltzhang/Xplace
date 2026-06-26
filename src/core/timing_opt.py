@@ -232,6 +232,17 @@ class GPUTimer():
         try:
             we, te, wl, tl, valid = self.gangsta.report(*self._build_signoff_parasitics())
             if not valid:
+                # Surface GangSTA's real reason (e.g. injected parasitics referenced net/node names
+                # that don't match the netlist -> disconnected per-net RC) instead of a generic
+                # "no constrained endpoints". The 'load' parasitics path is experimental; 'none' is
+                # the validated path.
+                err = ""
+                try:
+                    err = self.gangsta.error()
+                except Exception:
+                    pass
+                if err:
+                    self.gangsta_err = err
                 return None
             return {"wns_early": we, "tns_early": te, "wns_late": wl, "tns_late": tl}
         except Exception as e:

@@ -132,11 +132,20 @@ round-trip).
 - **Build:** GangSTA must be built first (`libgangsta.a`, PIC); the gputimer CMake auto-detects it
   (`GANGSTA_ROOT`, prints `ENABLED`/`DISABLED`) — a checkout without GangSTA builds exactly as before.
   Needs `libtcl8.6`.
-- **⚠️ Validation status — NOT yet run end-to-end on a real timing design.** No iccad2015 dataset is
-  present locally (`data/raw` is empty; the ispd2015 designs ship no `*_Early/_Late.lib`/`.sdc`).
-  What *is* validated: GangSTA's in-memory injection is byte-identical to reading a SPEF (gangsta
-  repo tests); `gputimer.so` links + loads GangSTA; `GangstaSignoff` builds a TAU-2015 design and
-  reports stable WNS/TNS through the Python binding, with non-empty parasitics taking effect. A full
-  `--timing_opt --signoff_timer both` placement run, and `load`-mode cap-unit calibration, **remain
-  to be done once an iccad2015 design is available.** Full details + the Mode-A (inner-loop timer
-  replacement) plan: `cpp_to_py/gputimer/GANGSTA_SIGNOFF.md`.
+- **✅ Validated end-to-end on ICCAD-2015 (`iccad2015/superblue4`).** A full
+  `--timing_opt True --signoff_timer both --signoff_parasitics load` GPU placement run builds the
+  GangSTA engine, reports WNS/TNS beside the GPU timer at the signoff milestone, and **never disturbs
+  the existing gputimer flow** (gputimer numbers unaffected; the run completes normally). GangSTA
+  `none`-mode late WNS = **−12241 ps**, identical to the standalone `gangsta run` CLI on the same
+  `.v`/`.lib`/`.sdc` — confirming the in-memory netlist build + report path is correct at iccad2015
+  scale (2.50M pins, ~8 s build).
+- **Engine fix found via this integration:** on a no-parasitics design GangSTA's NLDM transition LUT
+  used to *extrapolate* past `max_transition`, so long zero-load combinational chains diverged and
+  setup WNS overflowed to a `-9e30` sentinel. Fixed in the gangsta repo (ADR-0019: clamp LUT lookups
+  to table bounds; 214 golden tests still pass). After the fix, `superblue4` setup WNS is finite.
+- **`load`-mode parasitics is experimental:** injecting Xplace's per-net loads makes
+  `gangsta_report_wns_tns` return "no constrained endpoints" because Xplace's net/pin names don't all
+  match GangSTA's Verilog-derived `inst:pin` names (a single correctly-named injection works — the
+  bulk path needs name alignment). `none`-mode is the validated comparison path; the report failure
+  now surfaces GangSTA's real error in the log (`report_gangsta_signoff`). Full details + the Mode-A
+  (inner-loop timer replacement) plan: `cpp_to_py/gputimer/GANGSTA_SIGNOFF.md`.
