@@ -84,6 +84,21 @@ def place(lef_paths, in_def, out_def, util, site="", seed=0, deterministic=True,
             # the post-placement global-route evaluation that returns congestion metrics + a guide.
             args.use_route_force = True
             args.final_route_eval = True
+            # Load the FLUTE lookup tables that GGR's Steiner router needs. main.py does this in main()
+            # via Flute.register(); we bypass main() and call run_placement_single directly, so without
+            # this the shared libflute LUT is never read and GGR segfaults in flutes_LD during routing.
+            # Use ABSOLUTE paths (not the relative defaults) so the load is independent of cwd.
+            from src.core import Flute
+            Flute.register(
+                args.num_threads,
+                os.path.join(_HERE, "thirdparty", "flute", "POWV9.dat"),
+                os.path.join(_HERE, "thirdparty", "flute", "POST9.dat"),
+            )
+            # Routing stage: route the placement in `in_def` AS GIVEN — do not re-place it. The wisesyn
+            # CLI has already placed (via arrays or naive) and writes that placement here; the router
+            # must report congestion for THAT placement, not a fresh xplace GP. global_placement=False
+            # legalizes the input coords then runs the final GGR eval on them.
+            args.global_placement = False
 
         # run_placement_single returns (place_metrics, route_metrics); run_placement_main discards them.
         metrics = run_placement_single(args, setup_logger(args, sys.argv))

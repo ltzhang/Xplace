@@ -186,9 +186,12 @@ def get_route_force(
     # 1) run global routing and compute gradient mat
     grdb, input_mat, routeforce, route_gradmat = None, None, None, None
     if ps.rerun_route:
+        # run_fft=True is required here: the routability force needs `route_gradmat` (the FFT-derived
+        # 2xMxN congestion-force gradient computed in run_gr_and_fft only when run_fft=True). Without
+        # it route_gradmat stays None and routeforce.route_grad() rejects the None arg (TypeError).
         output = run_gr_and_fft_main(
-            args, logger, data, rawdb, gpdb, ps, mov_node_pos, 
-            constraint_fn=constraint_fn, skip_m1_route=skip_m1_route
+            args, logger, data, rawdb, gpdb, ps, mov_node_pos,
+            constraint_fn=constraint_fn, skip_m1_route=skip_m1_route, run_fft=True
         )
         grdb, routeforce, input_mat, cg_mapHV, map_raw, map_2d, route_gradmat, gr_metrics = output
         dmd_map, wire_dmd_map, via_dmd_map, cap_map = map_raw

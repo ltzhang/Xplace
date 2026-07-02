@@ -1122,10 +1122,19 @@ int readLefPin(lefrCallbackType_e c, lefiPin* pin, lefiUserData ud) {
                 logger.warning("lefiGeomUnknown: %s.%s", celltype->name.c_str(), name.c_str());
                 break;
             case lefiGeomLayerE:
+                // getLayer() returns null for layers the parser does not register (only ROUTING/CUT
+                // are registered; MASTERSLICE well/implant layers are not). A null `layer` here is a
+                // legitimate "skip this geometry" signal, not an error: e.g. sky130 std cells put
+                // body/well pins (VNB->pwell, VPB->nwell) on MASTERSLICE layers that global routing
+                // never uses. The OBS parser (readLefObs) already guards its rect add with
+                // `layer != NULL`; the assert() below used to catch this but is compiled out under
+                // NDEBUG, so `*layer` on the null case built a Geometry holding a null `const Layer&`
+                // that later crashed GGR's addCellObs (GRDatabase.cpp) at `e.layer.rIndex`. Skip the
+                // rects/polygons on such layers, mirroring the OBS path.
                 layer = db->getLayer(string(geom->getLayer(i)));
-                assert(layer);
                 break;
             case lefiGeomRectE:
+                if (layer == nullptr) break;  // non-routing (e.g. MASTERSLICE) pin geometry — skip
                 rect = geom->getRect(i);
                 pintype->addShape(*layer,
                                   lround(rect->xl * convertFactor),
@@ -1134,6 +1143,7 @@ int readLefPin(lefrCallbackType_e c, lefiPin* pin, lefiUserData ud) {
                                   lround(rect->yh * convertFactor));
                 break;
             case lefiGeomPolygonE:
+                if (layer == nullptr) break;  // non-routing (e.g. MASTERSLICE) pin geometry — skip
                 polygon = geom->getPolygon(i);
                 poly.clear();
                 bj = 0;
