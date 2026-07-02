@@ -424,9 +424,26 @@ def global_placement_main(gpdb, rawdb, ps: ParamScheduler, data: PlaceData, args
 
 
 def run_placement_main_nesterov(args, logger):
-    total_start = time.time()
     params = find_design_params(args, logger)
     data, rawdb, gpdb = load_dataset(args, logger, params)
+    _node_pos, place_metrics, route_metrics = run_nesterov_placement_on_data(
+        data, rawdb, gpdb, args, logger, params
+    )
+    return place_metrics, route_metrics
+
+
+def run_nesterov_placement_on_data(data, rawdb, gpdb, args, logger, params):
+    """Run the Nesterov global-placement + legalization/DP pipeline on an already-built ``PlaceData``.
+
+    Shared body of ``run_placement_main_nesterov`` that is independent of *how* ``data`` was built —
+    it works equally with the file-parser path (``load_dataset``) and the in-memory array-ingest path
+    (``wise_xplace_driver.place_arrays``). ``rawdb``/``gpdb`` may be ``None``: every use of them below
+    is guarded (route/write-back steps), so a design constructed purely from arrays runs end-to-end.
+
+    Returns ``(final_node_pos, place_metrics, route_metrics)`` where ``final_node_pos`` is the placed
+    (scaled/shifted, per-node center) tensor over all nodes in canonical order.
+    """
+    total_start = time.time()
     device = torch.device(
         "cuda:{}".format(args.gpu) if torch.cuda.is_available() else "cpu"
     )
@@ -494,4 +511,4 @@ def run_placement_main_nesterov(args, logger):
     if args.timing_opt:
         place_metrics += (wns_early_dp, tns_early_dp, wns_late_dp, tns_late_dp)
 
-    return place_metrics, route_metrics
+    return node_pos, place_metrics, route_metrics
