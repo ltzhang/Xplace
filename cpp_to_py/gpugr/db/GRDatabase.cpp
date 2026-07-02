@@ -977,6 +977,34 @@ std::pair<int, int> GRDatabase::reportGRStat() {
     return std::make_pair(wirelength, numVias);
 }
 
+std::vector<std::pair<std::string, double>> GRDatabase::reportGRNetLength() {
+    // Per-net routed wirelength in DBU. Each wire entry is (encodedGcellId, gcellLength); decode the
+    // layer/x/y exactly as writeGuides() does, then measure the DBU span the segment covers along its
+    // layer's preferred direction using the gridlines table (already in DEF DBU). Keyed by the original
+    // DEF net name (rawdb net name via getOriDBId), so the caller maps straight back to its own nets.
+    std::vector<std::pair<std::string, double>> out;
+    out.reserve(grNets.size());
+    for (int netId = 0; netId < grNets.size(); netId++) {
+        auto wires = grNets[netId].getWires();
+        double len_dbu = 0.0;
+        for (size_t i = 0; i < wires.size(); i += 2) {
+            int p = wires[i];
+            int len = wires[i + 1];
+            if (len <= 0) continue;
+            int l = p / nMaxGrid / nMaxGrid, x = p % (nMaxGrid * nMaxGrid) / nMaxGrid, y = p % nMaxGrid;
+            if (!(l & 1) ^ m1direction) std::swap(x, y);
+            if ((l & 1) ^ m1direction) {
+                len_dbu += static_cast<double>(gridlines[1][y + len] - gridlines[1][y]);  // along y
+            } else {
+                len_dbu += static_cast<double>(gridlines[0][x + len] - gridlines[0][x]);  // along x
+            }
+        }
+        int rawdbNetId = gpdb.getNets()[netId].getOriDBId();
+        out.emplace_back(rawdb.nets[rawdbNetId]->name, len_dbu);
+    }
+    return out;
+}
+
 void GRDatabase::writeGuides(std::string outputFile) {
     constexpr int LLL = 500000000;
 

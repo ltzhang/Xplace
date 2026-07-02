@@ -284,6 +284,22 @@ def run_gr_and_fft(args, logger, data, rawdb, gpdb, ps, grdb=None, skip_m1_route
     routeforce.run_ggr()
     logger.info("--------- End GR ---------")
 
+    # Export per-net routed wirelength (in DBU) for route-accurate RC readback (WiseSyn M9, ADR-0024).
+    # Written next to the route guide as "<guide-stem>.netlen": one "<netname> <length_dbu>" line per
+    # net. Only when a guide path was requested (the wisesyn final-route-eval sets given_gr_params
+    # route_guide). Best-effort: a failure here must never break routing.
+    _guide_path = given_gr_params.get("route_guide", "")
+    if _guide_path:
+        try:
+            _net_len = grdb.report_gr_net_length()  # [(def_net_name, length_dbu), ...]
+            _netlen_path = (_guide_path[:-len(".guide")] if _guide_path.endswith(".guide")
+                            else _guide_path) + ".netlen"
+            with open(_netlen_path, "w") as _f:
+                for _name, _length in _net_len:
+                    _f.write("%s %.6f\n" % (_name, _length))
+        except Exception as _e:  # noqa: BLE001 — never let readback export break the route
+            logger.warning("route-accurate netlen export failed: %s" % _e)
+
     m1direction = gpdb.m1direction()  # 0 for H, 1 for V, metal1's layer idx is 0
     hId = 1 if m1direction else 0
     vId = 0 if m1direction else 1

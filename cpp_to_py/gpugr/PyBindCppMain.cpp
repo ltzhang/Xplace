@@ -45,6 +45,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
     pybind11::class_<gr::GRDatabase, std::shared_ptr<gr::GRDatabase>>(m, "GRDatabase")
         .def(pybind11::init<std::shared_ptr<db::Database>, std::shared_ptr<gp::GPDatabase>>())
         .def("report_gr_stat", &gr::GRDatabase::reportGRStat)
+        .def("report_gr_net_length", &gr::GRDatabase::reportGRNetLength)
         .def("setup_capacity", &gr::GRDatabase::setupCapacity)
         .def("setup_wiredist", &gr::GRDatabase::setupWireDist)
         .def("setup_obs", &gr::GRDatabase::setupObs)

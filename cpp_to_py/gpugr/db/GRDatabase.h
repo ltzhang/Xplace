@@ -95,6 +95,10 @@ public:
     void resetGrNets() { grNets.clear(); };
 
     std::pair<int, int> reportGRStat();
+    // Per-net routed wirelength in DEF database units (DBU), keyed by the original DEF net name.
+    // Mirrors reportGRStat() but keeps the per-net breakdown and converts gcell spans to DBU via the
+    // gridlines (same conversion writeGuides() uses). Consumed by WiseSyn for route-accurate RC.
+    std::vector<std::pair<std::string, double>> reportGRNetLength();
     void writeGuides(std::string outputFile);
 
     int encodeId(int l, int x, int y);

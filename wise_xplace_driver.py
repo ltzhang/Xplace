@@ -117,6 +117,21 @@ def place(lef_paths, in_def, out_def, util, site="", seed=0, deterministic=True,
                                       route_metrics[3]))
             except (IndexError, TypeError):
                 result["route"] = "routed (metrics unavailable)"
+        if route:
+            # Per-net routed wirelength (DBU) exported by run_gr_and_fft next to the guide, for
+            # route-accurate RC readback. Keyed by DEF net name (= WiseDB net index string). Best-effort.
+            try:
+                net_len = {}
+                for nlp in glob.glob(os.path.join(outdir, "wise", "output", "*wise_top*.netlen")):
+                    with open(nlp) as nf:
+                        for line in nf:
+                            parts = line.split()
+                            if len(parts) == 2:
+                                net_len[parts[0]] = float(parts[1])
+                if net_len:
+                    result["net_len"] = net_len
+            except (OSError, ValueError):
+                pass
 
         # xplace writes {result_dir}/{exp_id}/{output_dir}/{prefix}_{design}_<id>.def; the detailed-
         # placement result carries the '_dp' id and is the newest .def. Glob + newest is robust to id.
