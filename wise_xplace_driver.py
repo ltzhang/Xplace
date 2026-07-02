@@ -30,6 +30,7 @@ def place(lef_paths, in_def, out_def, util, site="", seed=0, deterministic=True)
     result = {"ok": False, "gp_hpwl": -1.0, "dp_hpwl": -1.0, "error": ""}
     prev_cwd = os.getcwd()
     prev_argv = list(sys.argv)
+    outdir = None
     # Absolutize every caller path against the ORIGINAL cwd before chdir — the caller (the wisesyn CLI)
     # may pass relative LEF/DEF paths, which would break once we chdir into the xplace tree.
     lef_paths = [os.path.abspath(p) for p in lef_paths]
@@ -98,3 +99,5 @@ def place(lef_paths, in_def, out_def, util, site="", seed=0, deterministic=True)
     finally:
         os.chdir(prev_cwd)
         sys.argv = prev_argv
+        if outdir is not None:
+            shutil.rmtree(outdir, ignore_errors=True)  # DEF already copied to out_def
