@@ -119,15 +119,16 @@ def place(lef_paths, in_def, out_def, util, site="", seed=0, deterministic=True,
                 result["route"] = "routed (metrics unavailable)"
         if route:
             # Per-net routed wirelength (DBU) exported by run_gr_and_fft next to the guide, for
-            # route-accurate RC readback. Keyed by DEF net name (= WiseDB net index string). Best-effort.
+            # route-accurate RC readback. DEF nets are named "n<WiseDB net index>"; return integer
+            # WiseDB net-index keys so C++ never re-keys through driver-pin names.
             try:
                 net_len = {}
                 for nlp in glob.glob(os.path.join(outdir, "wise", "output", "*wise_top*.netlen")):
                     with open(nlp) as nf:
                         for line in nf:
                             parts = line.split()
-                            if len(parts) == 2:
-                                net_len[parts[0]] = float(parts[1])
+                            if len(parts) == 2 and parts[0].startswith("n"):
+                                net_len[int(parts[0][1:])] = float(parts[1])
                 if net_len:
                     result["net_len"] = net_len
             except (OSError, ValueError):
