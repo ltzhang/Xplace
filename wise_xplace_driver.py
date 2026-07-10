@@ -21,6 +21,40 @@ if _HERE not in sys.path:
     sys.path.insert(0, _HERE)
 
 
+def _preload_nvrtc_builtins():
+    """Preload libnvrtc-builtins so xplace's runtime NVRTC JIT (e.g. gpudp's hannan_legalize) resolves it.
+
+    The pip ``nvidia-cuda-nvrtc`` wheels that a cu13 torch pulls in ship ``libnvrtc.so.13`` and its
+    companion ``libnvrtc-builtins.so.13.x`` under ``site-packages/nvidia/*/lib/``, but that directory is
+    NOT on the loader path — so when NVRTC dlopen()s its builtins by soname it fails with
+    "failed to open libnvrtc-builtins.so.13.0". Loading the matching builtins here with RTLD_GLOBAL puts
+    it in the process by soname, so NVRTC's later dlopen returns it (no LD_LIBRARY_PATH needed). Best-
+    effort and version-matched to the linked NVRTC; a no-op if the layout differs (never raises).
+    """
+    import ctypes
+    cands = []
+    for base in sys.path:
+        if base and os.path.isdir(base):
+            cands += glob.glob(os.path.join(base, "nvidia", "*", "lib", "libnvrtc-builtins.so*"))
+    # Match the linked libnvrtc's major version; prefer the real (non-".alt.") builtins, newest first.
+    ver = ""
+    try:
+        ctypes.CDLL("libnvrtc.so", mode=ctypes.RTLD_GLOBAL)  # ensure the main lib is resolvable first
+    except OSError:
+        pass
+    real = sorted((c for c in set(cands) if ".alt." not in c), reverse=True)
+    for so in real or sorted(set(cands), reverse=True):
+        try:
+            ctypes.CDLL(so, mode=ctypes.RTLD_GLOBAL)
+            return so
+        except OSError:
+            continue
+    return None
+
+
+_preload_nvrtc_builtins()
+
+
 def place(lef_paths, in_def, out_def, util, site="", seed=0, deterministic=True, route=False):
     """Run xplace GPU global placement on ``in_def`` and copy the placed DEF to ``out_def``.
 
