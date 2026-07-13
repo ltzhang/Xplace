@@ -128,11 +128,13 @@ def place(lef_paths, in_def, out_def, util, site="", seed=0, deterministic=True,
                 os.path.join(_HERE, "thirdparty", "flute", "POWV9.dat"),
                 os.path.join(_HERE, "thirdparty", "flute", "POST9.dat"),
             )
-            # Routing stage: route the placement in `in_def` AS GIVEN — do not re-place it. The wisesyn
-            # CLI has already placed (via arrays or naive) and writes that placement here; the router
-            # must report congestion for THAT placement, not a fresh xplace GP. global_placement=False
-            # legalizes the input coords then runs the final GGR eval on them.
+            # Routing stage: route the placement in `in_def` AS GIVEN — do not re-place *or* legalize
+            # it.  The wisesyn CLI has already placed and writes that placement here; GGR must report
+            # congestion for those exact coordinates.  xplace's legalization path reparses hard macros
+            # as fixed/IO objects and can corrupt their coordinates before asserting (Chameleon).
             args.global_placement = False
+            args.legalization = False
+            args.detail_placement = False
 
         # run_placement_single returns (place_metrics, route_metrics); run_placement_main discards them.
         metrics = run_placement_single(args, setup_logger(args, sys.argv))
