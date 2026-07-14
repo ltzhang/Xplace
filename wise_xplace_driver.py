@@ -193,6 +193,12 @@ def place(lef_paths, in_def, out_def, util, site="", seed=0, deterministic=True,
         pattern = os.path.join(outdir, "wise", "output", "*wise_top*.def")
         defs = sorted(glob.glob(pattern), key=os.path.getmtime)
         if not defs:
+            if route:
+                # Route-only (global/detail placement disabled): the placement is unchanged, so the
+                # input DEF IS the placed result — GGR's guide (copied above) is the real output.
+                shutil.copyfile(in_def, out_def)
+                result["ok"] = os.path.exists(out_def)
+                return result
             result["error"] = "xplace wrote no placement DEF (looked for %s)" % pattern
             return result
         shutil.copyfile(defs[-1], out_def)
