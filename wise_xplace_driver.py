@@ -117,6 +117,11 @@ def place(lef_paths, in_def, out_def, util, site="", seed=0, deterministic=True,
         args.write_placement = True
         args.write_global_placement = False
         if route:
+            # The route-only path below disables global placement / legalization / detail placement —
+            # exactly the stages whose placement-writing normally creates `<outdir>/<exp_id>/<output_dir>`.
+            # Without them the guide directory never exists, so GGR's `GRDatabase::writeGuides()` fopen()
+            # returns NULL and the subsequent fwrite() segfaults. Create it up front.
+            os.makedirs(os.path.join(outdir, args.exp_id, args.output_dir), exist_ok=True)
             # Enable GGR: enable_route = use_route_force or use_cell_inflate; final_route_eval triggers
             # the post-placement global-route evaluation that returns congestion metrics + a guide.
             args.use_route_force = True
