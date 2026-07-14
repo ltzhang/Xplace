@@ -55,12 +55,15 @@ def _preload_nvrtc_builtins():
 _preload_nvrtc_builtins()
 
 
-def place(lef_paths, in_def, out_def, util, site="", seed=0, deterministic=True, route=False):
+def place(lef_paths, in_def, out_def, util, site="", seed=0, deterministic=True, route=False,
+          route_guide=None):
     """Run xplace GPU global placement on ``in_def`` and copy the placed DEF to ``out_def``.
 
     When ``route`` is true, also run xplace's GPU global router (GGR) on the produced placement and
     report congestion (ADR-0024 P4). Returns a dict:
         {"ok": bool, "gp_hpwl": float, "dp_hpwl": float, "route": str, "error": str}.
+    If ``route_guide`` is supplied with ``route=True``, preserve the GGR guide at that
+    caller-owned path instead of deleting it with the driver's temporary directory.
     Never raises across the boundary — any failure is reported in ["error"] with ok=False.
     """
     result = {"ok": False, "gp_hpwl": -1.0, "dp_hpwl": -1.0, "route": "", "error": ""}
@@ -169,6 +172,16 @@ def place(lef_paths, in_def, out_def, util, site="", seed=0, deterministic=True,
                     result["net_len"] = net_len
             except (OSError, ValueError):
                 pass
+            if route_guide:
+                guide = os.path.join(
+                    outdir, "wise", "output", "%s_%s.guide" % (args.output_prefix, args.design_name))
+                if not os.path.isfile(guide):
+                    result["error"] = "xplace wrote no global-route guide at %s" % guide
+                    return result
+                route_guide = os.path.abspath(route_guide)
+                os.makedirs(os.path.dirname(route_guide), exist_ok=True)
+                shutil.copyfile(guide, route_guide)
+                result["guide"] = route_guide
 
         # xplace writes {result_dir}/{exp_id}/{output_dir}/{prefix}_{design}_<id>.def; the detailed-
         # placement result carries the '_dp' id and is the newest .def. Glob + newest is robust to id.
