@@ -313,6 +313,15 @@ def run_gr_and_fft(args, logger, data, rawdb, gpdb, ps, grdb=None, skip_m1_route
     dmd_map, wire_dmd_map, via_dmd_map = routeforce.dmd_map()
     cap_map: torch.Tensor = routeforce.cap_map()
 
+    # GGR may DECLINE (RouteForce::run_ggr) when the routing grid exceeds GPU memory — a hard-macro design
+    # whose die/gcell grid is too large. It then routes nothing and leaves the demand/capacity maps empty.
+    # Detect that here and fail with a clear message (the C++ side already logged "GGR skipped: routing
+    # grid needs ~X GB ...") so the caller sees the real reason instead of a downstream empty-tensor
+    # IndexError. The driver reports this as an error and the WiseSyn flow falls back loudly (rule #7).
+    if dmd_map.numel() == 0 or cap_map.numel() == 0:
+        raise RuntimeError(
+            "GGR declined: routing grid did not fit GPU memory (see the 'GGR skipped' warning above)")
+
     dmd_map2d: torch.Tensor = dmd_map[aId:].sum(dim=0)
     wire_dmd_map2d: torch.Tensor = wire_dmd_map[aId:].sum(dim=0)
     via_dmd_map2d: torch.Tensor = via_dmd_map[aId:].sum(dim=0)

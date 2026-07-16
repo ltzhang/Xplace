@@ -4,6 +4,10 @@
 
 namespace gr {
 
+bool ggrQueryGpuMem(size_t* freeBytes, size_t* totalBytes) {
+    return cudaMemGetInfo(freeBytes, totalBytes) == cudaSuccess;
+}
+
 constexpr int MAX_ROUTE_LEN_PER_PIN = 130;   // too large may exceed the maximum GPU memory
 
 constexpr int INF = 10000000;
@@ -26,7 +30,11 @@ void GPURouter::initialize(int device_id, int layer, int x, int y, int N_, int c
     N = N_;
     X = x;
     Y = y;
-    int gridGraphSize = LAYER * N * N;
+    // Macro-aware GGR: large hard macros force a big die -> large gcell grid, so the per-batch dist/prev
+    // arrays sized (MAX_BATCH_SIZE+6)*gridGraphSize can exceed INT_MAX. gridGraphSize itself (LAYER*N*N,
+    // ~36M at N<=2000) fits int32, but the batch-scaled products below overflow int32 BEFORE the sizeof
+    // promotes to size_t. Make gridGraphSize int64 so every batch-scaled expression stays 64-bit.
+    int64_t gridGraphSize = (int64_t)LAYER * N * N;
     cudaMalloc(&dist, (MAX_BATCH_SIZE + 6) * gridGraphSize * sizeof(int));
     cudaMalloc(&prev, (MAX_BATCH_SIZE + 6) * gridGraphSize * sizeof(int));
     cudaMalloc(&capacity, gridGraphSize * sizeof(float));
@@ -200,9 +208,12 @@ __global__ void calculateCoarseVia(float *cell_resource, int *coarseVia, int *wi
     }
 }
 
-__global__ void initMap(dtype *dist, int *prev, int total, int N) {
-    int idx = blockIdx.x * blockDim.x + threadIdx.x;
-    if(idx < N) {
+// `count` is the batch-scaled total thread span (batchSize*LAYER*N*N), which can exceed INT_MAX on
+// macro-heavy designs, so it and the flat index must be 64-bit. `total` is the single-grid size
+// (LAYER*N*N, fits int32) used to wrap prev back into one net's grid.
+__global__ void initMap(dtype *dist, int *prev, int total, int64_t count) {
+    int64_t idx = (int64_t)blockIdx.x * blockDim.x + threadIdx.x;
+    if(idx < count) {
         dist[idx] = INF;
         prev[idx] = idx % total;
         //for(int i = 0; i < N; i++)
@@ -333,7 +344,9 @@ __global__ void calculateViaCost(int *wires, float *fixed, float *capacity, dtyp
 
 __global__ void setStartCells(dtype *dist, int *pins, int N, int T) {
     pins += blockIdx.x * N + 2;
-    dist += blockIdx.x * T;
+    // T is the single-grid size (LAYER*N*N); blockIdx.x*T is the per-batch offset into dist, which
+    // exceeds INT_MAX / uint32 range on large grids — compute it in 64-bit.
+    dist += (int64_t)blockIdx.x * T;
     for(int i = 1; i <= pins[0]; i++) {
         dist[pins[i]] = 0;
     }
@@ -843,7 +856,10 @@ void GPURouter::route(std::vector<GrNet> &nets, int iter) {
                 }
             }
             //printf("%d / %d = %.2lf\n", pin10, batchSize, pin10 * 1.0 / batchSize);
-            initMap<<<BLOCK_NUMBER(batchSize * LAYER * N * N), BLOCK_SIZE>>> (dist, prev, N * N * LAYER, batchSize * N * N * LAYER);
+            // Batch-scaled span batchSize*LAYER*N*N can exceed INT_MAX on macro-heavy designs; compute
+            // the launch block-count and the kernel's thread-span argument in 64-bit (BLOCK_NUMBER's
+            // division then yields an in-range grid dim). The single-grid `total` (N*N*LAYER) stays int.
+            initMap<<<BLOCK_NUMBER((int64_t)batchSize * LAYER * N * N), BLOCK_SIZE>>> (dist, prev, N * N * LAYER, (int64_t)batchSize * N * N * LAYER);
             setStartCells<<<batchSize, 1>>> (dist, allpins, MAX_PIN_SIZE_PER_NET, N * N * LAYER);
             double t = clock();
             gpuMR.getResults(costtime, costSum, allpins, dist, prev, cost, viaCost, wires, vias, routes, N, COARSENING_SCALE, DIRECTION, batchSize, netsToRoute[startpos]);

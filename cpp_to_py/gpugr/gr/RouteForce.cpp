@@ -11,6 +11,32 @@ void RouteForce::run_ggr() {
     logger.enable_logger();
     utils::timer T_total;
     T_total.start();
+
+    // Macro-aware GGR feasibility guard (rule #7 — decline loudly, never crash). Large hard macros push
+    // the die (and thus the gcell grid) big enough that the per-batch dist/prev arrays — each
+    // (MAX_BATCH_SIZE+6)*gridGraphSize*4 bytes, the dominant GPU allocation — can exceed the device's
+    // free memory. The int32 index overflow that used to corrupt this path is fixed (see GPURouter.cu),
+    // but a grid that genuinely does not fit must be declined here rather than dying in a failed
+    // cudaMalloc + downstream exit(0). Skipping the routing (no writeGuides) makes the driver report
+    // "no guide", so the caller falls back loudly to its FLUTE estimate.
+    {
+        const int64_t gridGraphSize = (int64_t)grdb.nLayers * grdb.nMaxGrid * grdb.nMaxGrid;
+        // dist+prev dominate: 2 * (MAX_BATCH_SIZE+6=106) * grid * 4B; plus ~15 single-grid arrays * 4B
+        // and costSum * 8B. Round the per-cell byte factor up for the coarse-grid + scratch extras.
+        const int64_t bytesPerCell = 2 * 106 * 4 + 15 * 4 + 8;  // ~= 916 B/cell
+        const int64_t needBytes = gridGraphSize * bytesPerCell;
+        size_t freeB = 0, totalB = 0;
+        if (ggrQueryGpuMem(&freeB, &totalB) &&
+            static_cast<size_t>(needBytes) + static_cast<size_t>(needBytes) / 10 > freeB) {
+            logger.warning(
+                "GGR skipped: routing grid needs ~%.1f GB but only ~%.1f GB is free on the GPU "
+                "(nMaxGrid=%d, layers=%d). Declining GGR for this design; the caller keeps its "
+                "interconnect estimate.",
+                needBytes / 1e9, freeB / 1e9, grdb.nMaxGrid, grdb.nLayers);
+            logger.reset_logger();
+            return;  // no router.initialize / route / writeGuides -> driver sees no guide -> loud fallback
+        }
+    }
     // we only need the PR segment, our current data structure unsupport MR route force
     // if rrrIters > 0, this router can only be used for congestion map computation or solution evaluation
     int runMazeRouteTimes = grSetting.rrrIters;

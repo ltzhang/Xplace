@@ -9,6 +9,11 @@ namespace gr {
 
 typedef int dtype;
 
+// Query free/total GPU memory in bytes (cudaMemGetInfo). Returns false if the CUDA query fails. Defined
+// in GPURouter.cu so host translation units (RouteForce.cpp) can gate GGR on GPU memory without pulling
+// in <cuda_runtime.h> into their host compile.
+bool ggrQueryGpuMem(size_t* freeBytes, size_t* totalBytes);
+
 class GPURouter {
 public:
     GPURouter(){};
