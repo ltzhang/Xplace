@@ -68,6 +68,11 @@ public:
 
     vector<Geometry> routeBlockages;
     vector<Rectangle> placeBlockages;
+    // Parallel to placeBlockages: 1 if the DEF marked the placement blockage SOFT or PARTIAL
+    // (a soft keep-out / macro halo — cells discouraged but allowed), 0 for a hard keep-out.
+    // Lets the placer treat soft halos as a reduced-weight density hint instead of a hard wall
+    // (which over-counts blocked area and over-compresses std cells; see initializer soft weight).
+    vector<char> placeBlockageIsSoft;
 
     PowerNet* powerNet = nullptr;
 

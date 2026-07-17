@@ -1688,8 +1688,13 @@ int readDefBlockage(defrCallbackType_e c, defiBlockage* dblk, defiUserData ud) {
             db->routeBlockages.emplace_back(*layer, dblk->xl(i), dblk->yl(i), dblk->xh(i), dblk->yh(i));
         }
     } else if (dblk->hasPlacement()) {
+        // SOFT / PARTIAL placement blockages are advisory keep-outs (macro halos): cells are
+        // discouraged but not forbidden. Record the flag so the placer can weight them softly
+        // instead of counting them as full hard-blocked area (which over-compresses std cells).
+        const char is_soft = (dblk->hasSoft() || dblk->hasPartial()) ? 1 : 0;
         for (int i = 0; i < dblk->defiBlockage::numRectangles(); ++i) {
             db->placeBlockages.emplace_back(dblk->xl(i), dblk->yl(i), dblk->xh(i), dblk->yh(i));
+            db->placeBlockageIsSoft.push_back(is_soft);
         }
     }
     return 0;

@@ -254,6 +254,7 @@ public:
     std::vector<torch::Tensor> getNode2PinInfoTensor();   // node2pin_index, node2pin_list, node2pin_list_end
     std::vector<torch::Tensor> getRegionInfoTensor();     // node_id2region_id, region_boxes, region_boxes_end
     std::vector<torch::Tensor> getSnetInfoTensor();       // snet_lpos, snet_size, snet_layer (0 for M1, 1 for M2, ...)
+    torch::Tensor getSoftBlockageMask();                  // per-node bool: 1 if a SOFT/PARTIAL placement blockage (macro halo)
     void applyOneNodeOrient(int node_id);
     void applyNodeCPos(torch::Tensor node_cpos);
     void applyNodeLPos(torch::Tensor node_lpos);

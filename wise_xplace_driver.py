@@ -56,7 +56,7 @@ _preload_nvrtc_builtins()
 
 
 def place(lef_paths, in_def, out_def, util, site="", seed=0, deterministic=True, route=False,
-          route_guide=None):
+          route_guide=None, soft_blockage_weight=None):
     """Run xplace GPU global placement on ``in_def`` and copy the placed DEF to ``out_def``.
 
     When ``route`` is true, also run xplace's GPU global router (GGR) on the produced placement and
@@ -109,6 +109,8 @@ def place(lef_paths, in_def, out_def, util, site="", seed=0, deterministic=True,
         args.seed = int(seed)
         if hasattr(args, "target_density"):
             args.target_density = float(util)
+        if soft_blockage_weight is not None and hasattr(args, "soft_blockage_weight"):
+            args.soft_blockage_weight = float(soft_blockage_weight)
         args.result_dir = outdir
         args.exp_id = "wise"
         args.output_dir = "output"

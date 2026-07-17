@@ -37,6 +37,14 @@ def get_option():
     parser.add_argument('--enable_skip_update', type=str2bool, default=True, help='enable skip update')
     parser.add_argument('--enable_sample_force', type=str2bool, default=True, help='enable sample force')
     parser.add_argument("--mixed_size", type=str2bool, default=False, help="enable mixed size placement")
+    parser.add_argument("--soft_blockage_weight", type=float, default=1.0,
+                        help="density weight for SOFT/PARTIAL placement blockages (macro halos). "
+                             "Default 1.0 keeps the legacy behavior (soft halos treated as hard "
+                             "keep-outs). A value in [0,1) treats them as soft: it frees the halo "
+                             "area in the placeable-area/filler accounting so std cells spread "
+                             "(0.0 ignores the halo entirely, which can lose the halo channel and "
+                             "hurt DP legalization; a small positive value keeps a soft halo). Opt-in "
+                             "mechanism (ADR-0032); no effect on designs without soft blockages.")
 
     # global routing params
     parser.add_argument('--use_cell_inflate', type=str2bool, default=False, help='use cell inflation')

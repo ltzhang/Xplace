@@ -18,11 +18,26 @@ def get_init_density_map(rawdb, gpdb, data: PlaceData, args, logger, ps=None):
     node_pos = data.node_pos[lhs:rhs]
     node_size = data.node_size[lhs:rhs]
     node_weight = node_size.new_ones(node_size.shape[0])
+    # SOFT placement blockages (macro halos) are advisory keep-outs: cells are discouraged but not
+    # forbidden. Counting them as full hard-blocked density (weight 1) over-restricts the placeable
+    # area on macro designs, so std cells over-compress into the remaining die -> local routing
+    # congestion (GRT). Weight them by args.soft_blockage_weight (< 1) instead: this both frees the
+    # halo area in the placeable-area/filler accounting (cells spread) AND leaves a partial density
+    # hill at the halo (a soft channel is preserved, so DP can still legalize around the macros).
+    soft_w = float(getattr(args, "soft_blockage_weight", 1.0))
+    if gpdb is not None and soft_w != 1.0:
+        soft_mask = gpdb.soft_blockage_mask().to(node_weight.device)[lhs:rhs]
+        if soft_mask.any():
+            node_weight = torch.where(soft_mask, node_weight.new_full((), soft_w), node_weight)
+            logger.info("Down-weighting %d soft placement-blockage (halo) node(s) to %.3f in the "
+                        "fixed-density map." % (int(soft_mask.sum().item()), soft_w))
     if ps is not None and ps.zero_macro_grad:
         # compute the mov + fixed macro density map
+        num_mov_macro = int(data.is_mov_macro.sum().item())
         node_pos = torch.cat([data.node_pos[data.is_mov_macro].contiguous(), node_pos])
         node_size = torch.cat([data.node_size[data.is_mov_macro].contiguous(), node_size])
-        node_weight = node_size.new_ones(node_size.shape[0])
+        # movable macros are hard (weight 1); keep the soft-blockage weights computed above.
+        node_weight = torch.cat([node_weight.new_ones(num_mov_macro), node_weight])
     if args.timing_opt: # TODO: sideline
         node_size = node_size.clone()
         node_size[:, 0] *= 1.05

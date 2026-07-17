@@ -845,6 +845,25 @@ std::vector<torch::Tensor> GPDatabase::getSnetInfoTensor() {
     return {snet_lpos, snet_size, snet_layer};
 }
 
+torch::Tensor GPDatabase::getSoftBlockageMask() {
+    // Per-node boolean, aligned with the node ordering the other *_tensor getters use. A node is
+    // marked true iff it is a placement-blockage node (node_type "Blkg") whose originating DEF
+    // blockage was SOFT/PARTIAL. Blkg nodes carry the blockage index in OriDBId (see addBlockageNode),
+    // so we look the soft flag up there. Hard keep-outs (and all non-blockage nodes) stay false.
+    torch::Tensor mask = torch::zeros({static_cast<int64_t>(nodes.size())},
+                                      torch::TensorOptions().dtype(torch::kBool));
+    auto mask_a = mask.accessor<bool, 1>();
+    for (size_t i = 0; i < nodes.size(); i++) {
+        if (nodes[i].getNodeType() != "Blkg") continue;
+        index_type bid = nodes[i].getOriDBId();
+        if (bid >= 0 && bid < static_cast<index_type>(database.placeBlockageIsSoft.size()) &&
+            database.placeBlockageIsSoft[bid]) {
+            mask_a[i] = true;
+        }
+    }
+    return mask;
+}
+
 void GPDatabase::applyOneNodeOrient(int node_id) {
     auto& node = nodes[node_id];
 
