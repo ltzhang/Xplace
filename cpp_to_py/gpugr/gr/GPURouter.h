@@ -19,11 +19,13 @@ public:
     GPURouter(){};
     GPURouter(
         int device_id, int layer, int x, int y, int N_, int cgxsize_, int cgysize_, int direction, int csrn_scale) {
-        initialize(device_id, layer, x, y, N_, cgxsize_, cgysize_, direction, csrn_scale);
+        (void)initialize(device_id, layer, x, y, N_, cgxsize_, cgysize_, direction, csrn_scale);
     }
     ~GPURouter();
 
-    void initialize(
+    // Returns false (having freed nothing new) if any device allocation failed — the caller must then
+    // decline routing (skip writeGuides) so the driver falls back to its interconnect estimate (#7).
+    [[nodiscard]] bool initialize(
         int device_id, int layer, int x, int y, int N_, int cgxsize_, int cgysize_, int direction, int csrn_scale);
 
     void setMap(const std::vector<float> &cap,

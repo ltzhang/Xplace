@@ -26,8 +26,20 @@ void RouteForce::run_ggr() {
         const int64_t bytesPerCell = 2 * 106 * 4 + 15 * 4 + 8;  // ~= 916 B/cell
         const int64_t needBytes = gridGraphSize * bytesPerCell;
         size_t freeB = 0, totalB = 0;
-        if (ggrQueryGpuMem(&freeB, &totalB) &&
-            static_cast<size_t>(needBytes) + static_cast<size_t>(needBytes) / 10 > freeB) {
+        const bool queried = ggrQueryGpuMem(&freeB, &totalB);
+        // Fail CLOSED when the query itself fails: if we cannot read free GPU memory we cannot admit the
+        // grid, so decline rather than blindly proceed into cudaMalloc (the estimate is only an early
+        // admission check, not a substitute for the checked allocations in GPURouter::initialize).
+        if (!queried) {
+            logger.warning(
+                "GGR skipped: cudaMemGetInfo failed, cannot verify the routing grid (~%.1f GB, "
+                "nMaxGrid=%d, layers=%d) fits — declining GGR; the caller keeps its interconnect "
+                "estimate.",
+                needBytes / 1e9, grdb.nMaxGrid, grdb.nLayers);
+            logger.reset_logger();
+            return;  // no router.initialize / route / writeGuides -> driver sees no guide -> loud fallback
+        }
+        if (static_cast<size_t>(needBytes) + static_cast<size_t>(needBytes) / 10 > freeB) {
             logger.warning(
                 "GGR skipped: routing grid needs ~%.1f GB but only ~%.1f GB is free on the GPU "
                 "(nMaxGrid=%d, layers=%d). Declining GGR for this design; the caller keeps its "
@@ -48,15 +60,22 @@ void RouteForce::run_ggr() {
     double _unitShortVioCostRaw = 500;
     double rrrInitVioCostDiscount = 0.1;
 
-    router.initialize(grSetting.deviceId,
-                      grdb.nLayers,
-                      grdb.xSize,
-                      grdb.ySize,
-                      grdb.nMaxGrid,
-                      grdb.cgxsize,
-                      grdb.cgysize,
-                      grdb.m1direction,
-                      grdb.csrnScale);
+    if (!router.initialize(grSetting.deviceId,
+                           grdb.nLayers,
+                           grdb.xSize,
+                           grdb.ySize,
+                           grdb.nMaxGrid,
+                           grdb.cgxsize,
+                           grdb.cgysize,
+                           grdb.m1direction,
+                           grdb.csrnScale)) {
+        // A device allocation failed despite passing the estimate (fragmentation / concurrent GPU
+        // use). Decline atomically — no route / writeGuides — so the driver falls back loudly (#7).
+        logger.warning("GGR skipped: GPU router initialization failed to allocate; declining GGR, the "
+                       "caller keeps its interconnect estimate.");
+        logger.reset_logger();
+        return;
+    }
     router.setMap(grdb.capacity, grdb.wireDist, grdb.fixedLength, grdb.fixedUsage);
 
     std::vector<float> _unitShortVioCost(grdb.nLayers), _unitShortVioCostDiscounted(grdb.nLayers);

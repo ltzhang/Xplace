@@ -18,7 +18,24 @@ constexpr int MAX_COST = 10000000;
 
 __managed__ int STAMP = 0, wireLen, viaLen;
 
-void GPURouter::initialize(int device_id, int layer, int x, int y, int N_, int cgxsize_, int cgysize_, int direction, int csrn_scale) {
+// Checked device allocation (rule #7): on ANY cudaMalloc/cudaMemset failure — fragmentation, a
+// concurrent GPU user, an estimate error, or a query that could not admit the grid — log loudly and
+// fail initialization ATOMICALLY, returning false. Leaving a null/partial buffer for a downstream
+// kernel to dereference would crash or silently corrupt the route; declining here makes run_ggr skip
+// writeGuides so the driver falls back loudly to its FLUTE interconnect estimate.
+#define GGR_CK(call)                                                                              \
+    do {                                                                                          \
+        cudaError_t _e = (call);                                                                  \
+        if (_e != cudaSuccess) {                                                                  \
+            fprintf(stderr,                                                                        \
+                    "GGR: GPU allocation failed (%s) at %s:%d — declining GGR; the caller keeps " \
+                    "its interconnect estimate\n",                                                 \
+                    cudaGetErrorString(_e), __FILE__, __LINE__);                                   \
+            return false;                                                                         \
+        }                                                                                         \
+    } while (0)
+
+bool GPURouter::initialize(int device_id, int layer, int x, int y, int N_, int cgxsize_, int cgysize_, int direction, int csrn_scale) {
     gpuMR.startGPU(device_id, layer, cgxsize_, cgysize_);
     DEVICE_ID = device_id;
     DIRECTION = direction;
@@ -30,31 +47,38 @@ void GPURouter::initialize(int device_id, int layer, int x, int y, int N_, int c
     N = N_;
     X = x;
     Y = y;
+    // Null every grid buffer FIRST so a mid-sequence allocation failure leaves the rest null — the
+    // destructor's unconditional cudaFree calls are then all safe (cudaFree(nullptr) is a no-op).
+    dist = prev = wires = vias = modifiedWire = modifiedVia = isOverflowWire = isOverflowVia = allpins = nullptr;
+    capacity = wireDist = fixedLength = fixed = cell_resource = unitShortCostDiscounted = nullptr;
+    viaCost = cost = nullptr;
+    costSum = nullptr;
     // Macro-aware GGR: large hard macros force a big die -> large gcell grid, so the per-batch dist/prev
     // arrays sized (MAX_BATCH_SIZE+6)*gridGraphSize can exceed INT_MAX. gridGraphSize itself (LAYER*N*N,
     // ~36M at N<=2000) fits int32, but the batch-scaled products below overflow int32 BEFORE the sizeof
     // promotes to size_t. Make gridGraphSize int64 so every batch-scaled expression stays 64-bit.
     int64_t gridGraphSize = (int64_t)LAYER * N * N;
-    cudaMalloc(&dist, (MAX_BATCH_SIZE + 6) * gridGraphSize * sizeof(int));
-    cudaMalloc(&prev, (MAX_BATCH_SIZE + 6) * gridGraphSize * sizeof(int));
-    cudaMalloc(&capacity, gridGraphSize * sizeof(float));
-    cudaMalloc(&wireDist, gridGraphSize * sizeof(float));
-    cudaMalloc(&fixedLength, gridGraphSize * sizeof(float));
-    cudaMalloc(&fixed, gridGraphSize * sizeof(float));
-    cudaMalloc(&wires, gridGraphSize * sizeof(int));
-    cudaMalloc(&vias, gridGraphSize * sizeof(int));    
-    cudaMemset(wires, 0, sizeof(int) * gridGraphSize);
-    cudaMemset(vias, 0, sizeof(int) * gridGraphSize);
-    cudaMalloc(&modifiedWire, gridGraphSize * sizeof(int));
-    cudaMalloc(&modifiedVia, gridGraphSize * sizeof(int));
-    cudaMalloc(&viaCost, gridGraphSize * sizeof(dtype));
-    cudaMalloc(&cost, gridGraphSize * sizeof(dtype));
-    cudaMalloc(&costSum, gridGraphSize * sizeof(int64_t));
-    cudaMalloc(&cell_resource, gridGraphSize * sizeof(float));
-    cudaMalloc(&isOverflowWire, gridGraphSize * sizeof(int));
-    cudaMalloc(&isOverflowVia, gridGraphSize * sizeof(int));
-    cudaMalloc(&unitShortCostDiscounted, LAYER * sizeof(float));
-    cudaMallocManaged(&allpins, MAX_BATCH_SIZE * MAX_PIN_SIZE_PER_NET * sizeof(int));
+    GGR_CK(cudaMalloc(&dist, (MAX_BATCH_SIZE + 6) * gridGraphSize * sizeof(int)));
+    GGR_CK(cudaMalloc(&prev, (MAX_BATCH_SIZE + 6) * gridGraphSize * sizeof(int)));
+    GGR_CK(cudaMalloc(&capacity, gridGraphSize * sizeof(float)));
+    GGR_CK(cudaMalloc(&wireDist, gridGraphSize * sizeof(float)));
+    GGR_CK(cudaMalloc(&fixedLength, gridGraphSize * sizeof(float)));
+    GGR_CK(cudaMalloc(&fixed, gridGraphSize * sizeof(float)));
+    GGR_CK(cudaMalloc(&wires, gridGraphSize * sizeof(int)));
+    GGR_CK(cudaMalloc(&vias, gridGraphSize * sizeof(int)));
+    GGR_CK(cudaMemset(wires, 0, sizeof(int) * gridGraphSize));
+    GGR_CK(cudaMemset(vias, 0, sizeof(int) * gridGraphSize));
+    GGR_CK(cudaMalloc(&modifiedWire, gridGraphSize * sizeof(int)));
+    GGR_CK(cudaMalloc(&modifiedVia, gridGraphSize * sizeof(int)));
+    GGR_CK(cudaMalloc(&viaCost, gridGraphSize * sizeof(dtype)));
+    GGR_CK(cudaMalloc(&cost, gridGraphSize * sizeof(dtype)));
+    GGR_CK(cudaMalloc(&costSum, gridGraphSize * sizeof(int64_t)));
+    GGR_CK(cudaMalloc(&cell_resource, gridGraphSize * sizeof(float)));
+    GGR_CK(cudaMalloc(&isOverflowWire, gridGraphSize * sizeof(int)));
+    GGR_CK(cudaMalloc(&isOverflowVia, gridGraphSize * sizeof(int)));
+    GGR_CK(cudaMalloc(&unitShortCostDiscounted, LAYER * sizeof(float)));
+    GGR_CK(cudaMallocManaged(&allpins, MAX_BATCH_SIZE * MAX_PIN_SIZE_PER_NET * sizeof(int)));
+    return true;
 }
 
 GPURouter::~GPURouter() {
