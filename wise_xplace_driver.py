@@ -576,3 +576,108 @@ def place_arrays(arrays, util, seed=0, deterministic=True):
         sys.argv = prev_argv
         if outdir is not None:
             shutil.rmtree(outdir, ignore_errors=True)
+
+
+def legalize_arrays(arrays, deterministic=True):
+    """Legalize an in-memory array netlist AT ITS GIVEN COORDINATES — no global placement.
+
+    WiseSyn RR-4 (local legalize after an in-place remap): run xplace's EXISTING standard-cell
+    legalization stack — ``run_lg`` = greedy legalization (+ filler retry) + Abacus, each followed
+    by the gpudp legality ``check`` — on positions supplied by the caller, then return the snapped
+    coordinates. Locality comes from the node typing, not a new algorithm: nodes the caller types
+    ``Fix`` are frozen obstacles the legalizers place around, nodes typed ``Mov`` are the only ones
+    that move. Freezing everything except a remapped cone is therefore the caller's policy knob.
+
+    Same ``arrays`` schema as :func:`place_arrays` (see ``build_design_info_from_arrays``); the
+    caller seeds every ``Mov`` node's ``node_lpos`` with its desired start position (e.g. the
+    centroid of its placed neighbors for a fresh cell). Returns
+        {"ok": bool, "coords": [[x,y], ...]  # legalized lower-left, DB units, INPUT node order
+         "legal": bool,  # the post-Abacus gpudp legality check verdict — never silently assumed
+         "error": str}
+    Never raises across the boundary; a failure reports in ["error"] with ok=False and no
+    fabricated coordinates (rule #7). Runs the same GPU-backed pipeline as place_arrays (the LG
+    kernels themselves are CPU, but the PlaceData tensor plumbing asserts CUDA).
+    """
+    result = {"ok": False, "coords": [], "legal": False, "error": ""}
+    prev_cwd = os.getcwd()
+    prev_argv = list(sys.argv)
+    outdir = None
+    try:
+        os.chdir(_HERE)
+        sys.argv = ["wise_xplace_driver"]
+
+        import torch
+        if not torch.cuda.is_available():
+            result["error"] = "torch.cuda.is_available() is False (no GPU)"
+            return result
+
+        from main import get_option
+        from utils import setup_logger
+        from utils.tools import set_random_seed
+        from src.database import PlaceData
+        from src.detail_placement import (
+            get_ori_scale_factor,
+            preprocess_db_cache,
+            run_lg,
+            setup_detailed_rawdb,
+        )
+
+        design_info = build_design_info_from_arrays(arrays)
+        input_perm = design_info.pop("__input_perm__")
+
+        outdir = tempfile.mkdtemp(prefix="wise_xplace_lg_")
+        args = get_option()
+        args.custom_path = ""
+        args.custom_json = ""
+        args.load_from_raw = False
+        args.deterministic = bool(deterministic)
+        args.seed = 0
+        args.result_dir = outdir
+        args.exp_id = "wise"
+        args.output_dir = "output"
+        args.output_prefix = "legalize"
+        args.design_name = "wise_top"
+        args.write_placement = False
+        args.write_global_placement = False
+
+        logger = setup_logger(args, sys.argv)
+
+        data = PlaceData(args, logger, **design_info)
+        set_random_seed(args)
+        device = torch.device("cuda:{}".format(args.gpu))
+        data = data.to(device)
+        data = data.preprocess()   # normalizes node_pos into the pipeline's scaled frame
+
+        # detail_placement keeps a module-level tensor cache keyed by nothing — reset it exactly
+        # like detail_placement_main does before building a rawdb for a fresh design.
+        preprocess_db_cache.reset()
+        node_pos = data.node_pos.clone()   # per-node centers at the CALLER's coordinates
+        node_pos = run_lg(node_pos, data, args, logger)
+
+        # Post-LG legality verdict, reported (not just logged) so the caller can fail loudly on a
+        # cone too congested to absorb its cells instead of committing an overlapped placement.
+        check_rawdb = setup_detailed_rawdb(node_pos, True, data, args, logger, after_lg=True)
+        result["legal"] = bool(check_rawdb.check(get_ori_scale_factor(data)))
+        del check_rawdb
+
+        exact_node_cpos = torch.round(node_pos * data.die_scale + data.die_shift)
+        exact_node_lpos = torch.round(
+            exact_node_cpos - torch.round(data.node_size * data.die_scale) / 2
+        ).cpu()
+        coords_canon = exact_node_lpos
+        coords_input = torch.empty_like(coords_canon)
+        coords_input[input_perm] = coords_canon
+        result["coords"] = coords_input.tolist()
+        result["ok"] = True
+        return result
+    except BaseException as e:
+        import traceback
+        result["error"] = "xplace legalize driver: %s\n%s" % (e, traceback.format_exc())
+        result["coords"] = []
+        result["ok"] = False
+        return result
+    finally:
+        os.chdir(prev_cwd)
+        sys.argv = prev_argv
+        if outdir is not None:
+            shutil.rmtree(outdir, ignore_errors=True)
