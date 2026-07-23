@@ -591,7 +591,7 @@ __global__ void generateBatch(int n, int *minx, int *maxx, int *miny, int *maxy,
     }
 }
 
-void GPURouter::route(std::vector<GrNet> &nets, int iter) {
+bool GPURouter::route(std::vector<GrNet> &nets, int iter) {
     logger.info("GPU Routing start... DIRECTION: %d", DIRECTION);
 
     double prtime = 0, prpreparetime = 0, batchgentime = 0, timer2 = 0;
@@ -828,8 +828,10 @@ void GPURouter::route(std::vector<GrNet> &nets, int iter) {
             int offset = batchSize;
             int gbPinOffset = batchSize;
             if(points == nullptr) {
-                cudaMallocManaged(&points, 20000000 * sizeof(int));
-                cudaMallocManaged(&gbpoints, 10000000 * sizeof(int));
+                // P2g: the per-iteration scratch was the last unchecked allocation in the route
+                // loop — a failure here previously crashed in prepare() instead of declining.
+                GGR_CK(cudaMallocManaged(&points, 20000000 * sizeof(int)));
+                GGR_CK(cudaMallocManaged(&gbpoints, 10000000 * sizeof(int)));
             }
             // double prepare_part_time = 0;
             double prepare_detailed_time = 0;
@@ -918,9 +920,10 @@ void GPURouter::route(std::vector<GrNet> &nets, int iter) {
         logger.info("Final Overflow Net Number: %d", cnt);
         numOvflNets = cnt;
     }
+    return true;
 }
 
-void GPURouter::setFromNets(std::vector<GrNet> &nets, int numPlPin_) {
+bool GPURouter::setFromNets(std::vector<GrNet> &nets, int numPlPin_) {
     NET_NUM = nets.size();
     pinNumCPU = new int[NET_NUM];
     routesOffsetCPU = new int[NET_NUM + 1];
@@ -929,12 +932,12 @@ void GPURouter::setFromNets(std::vector<GrNet> &nets, int numPlPin_) {
         pinNumCPU[i] = nets[i].getPins().size();
         routesOffsetCPU[i + 1] = pinNumCPU[i] * MAX_ROUTE_LEN_PER_PIN + routesOffsetCPU[i];
     }
-    cudaMallocManaged(&isOverflowNet, NET_NUM * sizeof(int));
-    cudaMalloc(&routes, routesOffsetCPU[NET_NUM] * sizeof(int));
-    cudaMemset(routes, 0, routesOffsetCPU[NET_NUM] * sizeof(int));
+    GGR_CK(cudaMallocManaged(&isOverflowNet, NET_NUM * sizeof(int)));
+    GGR_CK(cudaMalloc(&routes, routesOffsetCPU[NET_NUM] * sizeof(int)));
+    GGR_CK(cudaMemset(routes, 0, routesOffsetCPU[NET_NUM] * sizeof(int)));
     logger.info("total routes: %d", routesOffsetCPU[NET_NUM]);
-    cudaMalloc(&routesOffset, (NET_NUM + 1) * sizeof(int));
-    cudaMemcpy(routesOffset, routesOffsetCPU, sizeof(int) * (NET_NUM + 1), cudaMemcpyHostToDevice);
+    GGR_CK(cudaMalloc(&routesOffset, (NET_NUM + 1) * sizeof(int)));
+    GGR_CK(cudaMemcpy(routesOffset, routesOffsetCPU, sizeof(int) * (NET_NUM + 1), cudaMemcpyHostToDevice));
 
     for (int netId = nets.size() - 1; netId >= 0; netId--) {
         auto& lastGrNet = nets[netId];
@@ -944,8 +947,8 @@ void GPURouter::setFromNets(std::vector<GrNet> &nets, int numPlPin_) {
         }
     }
     // numRoutes, routeId, routeId, routeId, routeId, numVias
-    cudaMalloc(&gbpinRoutes, 6 * numGbPin * sizeof(int));
-    cudaMemset(gbpinRoutes, 0, 6 * numGbPin * sizeof(int));
+    GGR_CK(cudaMalloc(&gbpinRoutes, 6 * numGbPin * sizeof(int)));
+    GGR_CK(cudaMemset(gbpinRoutes, 0, 6 * numGbPin * sizeof(int)));
 
     // number of pins in placement database
     numPlPin = numPlPin_;
@@ -961,18 +964,22 @@ void GPURouter::setFromNets(std::vector<GrNet> &nets, int numPlPin_) {
             }
         }
     }
-    cudaMalloc(&gbpin2netId, numGbPin * sizeof(int));
-    cudaMemcpy(gbpin2netId, gbpin2netIdCPU.data(), numGbPin * sizeof(int), cudaMemcpyHostToDevice);
-    cudaMalloc(&plPinId2gbPinId, numPlPin * sizeof(int));
-    cudaMemcpy(plPinId2gbPinId, plPinId2gbPinIdCPU.data(), numPlPin * sizeof(int), cudaMemcpyHostToDevice);
+    GGR_CK(cudaMalloc(&gbpin2netId, numGbPin * sizeof(int)));
+    GGR_CK(cudaMemcpy(gbpin2netId, gbpin2netIdCPU.data(), numGbPin * sizeof(int), cudaMemcpyHostToDevice));
+    GGR_CK(cudaMalloc(&plPinId2gbPinId, numPlPin * sizeof(int)));
+    GGR_CK(cudaMemcpy(plPinId2gbPinId, plPinId2gbPinIdCPU.data(), numPlPin * sizeof(int), cudaMemcpyHostToDevice));
 
-    cudaDeviceSynchronize();
+    GGR_CK(cudaDeviceSynchronize());
+    return true;
 }
 
-void GPURouter::setToNets(std::vector<GrNet> &nets) {
-    int *routesCPU = new int[routesOffsetCPU[NET_NUM]];
+bool GPURouter::setToNets(std::vector<GrNet> &nets) {
+    // P2g: vector (not new[]) so the checked-copy early return cannot leak; an unchecked D2H copy
+    // here previously read back garbage routes on failure instead of declining.
+    std::vector<int> routesCPUBuf(routesOffsetCPU[NET_NUM]);
+    int *routesCPU = routesCPUBuf.data();
     int mx = 0;
-    cudaMemcpy(routesCPU, routes, sizeof(int) * routesOffsetCPU[NET_NUM], cudaMemcpyDeviceToHost);
+    GGR_CK(cudaMemcpy(routesCPU, routes, sizeof(int) * routesOffsetCPU[NET_NUM], cudaMemcpyDeviceToHost));
     int num_net_use_too_many_route = 0;
     for(size_t netId = 0; netId < nets.size(); netId++) {
         std::vector<int> wires, vias;
@@ -999,7 +1006,7 @@ void GPURouter::setToNets(std::vector<GrNet> &nets) {
         std::cerr << "ERROR: there are " << num_net_use_too_many_route << " nets use too many route segments!";
         std::cerr << " Please set MAX_ROUTE_LEN_PER_PIN (" << MAX_ROUTE_LEN_PER_PIN << ") larger than " << mx << std::endl;
     }
-    delete[] routesCPU;
+    return true;
 }
 
 }  // namespace gr

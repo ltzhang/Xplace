@@ -79,7 +79,13 @@ void RouteForce::run_ggr() {
     router.setMap(grdb.capacity, grdb.wireDist, grdb.fixedLength, grdb.fixedUsage);
 
     std::vector<float> _unitShortVioCost(grdb.nLayers), _unitShortVioCostDiscounted(grdb.nLayers);
-    router.setFromNets(grdb.grNets, grdb.gpdb.getPins().size());
+    if (!router.setFromNets(grdb.grNets, grdb.gpdb.getPins().size())) {
+        // P2g: a net-buffer allocation failed after initialize passed — decline atomically (#7).
+        logger.warning("GGR skipped: GPU net-buffer allocation failed; declining GGR, the caller "
+                       "keeps its interconnect estimate.");
+        logger.reset_logger();
+        return;
+    }
     router.setUnitViaCost(_unitViaCost);
     for (int i = 0; i < grdb.nLayers; ++i) {
         _unitShortVioCost[i] =
@@ -98,12 +104,24 @@ void RouteForce::run_ggr() {
         }
         utils::timer T;
         T.start();
-        router.route(grdb.grNets, iter);
+        if (!router.route(grdb.grNets, iter)) {
+            // P2g: an in-loop scratch allocation failed — decline (no setToNets / writeGuides).
+            logger.warning("GGR skipped: GPU routing scratch allocation failed; declining GGR, the "
+                           "caller keeps its interconnect estimate.");
+            logger.reset_logger();
+            return;
+        }
         tot_time += T.elapsed();
         logger.info("##### GPU Routing Iter: %d Time: %.4f #####", iter, T.elapsed());
         // break;
     }
-    router.setToNets(grdb.grNets);
+    if (!router.setToNets(grdb.grNets)) {
+        // P2g: the route read-back failed — the routes buffer would be garbage; decline (#7).
+        logger.warning("GGR skipped: GPU route read-back failed; declining GGR, the caller keeps "
+                       "its interconnect estimate.");
+        logger.reset_logger();
+        return;
+    }
     logger.info("Total GPU Routing time: %.4f", tot_time);
 
     if (grSetting.routeGuideFile != "") {

@@ -32,9 +32,12 @@ public:
                 const std::vector<float> &wir,
                 const std::vector<float> &fixedL,
                 const std::vector<float> &fix);
-    void setFromNets(std::vector<GrNet> &nets, int numPlPin_);
-    void setToNets(std::vector<GrNet> &nets);
-    void route(std::vector<GrNet> &nets, int iterleft);
+    // P2g (WiseSyn WS2): every stage that allocates or copies on the device is checked and
+    // fail-closed — false means "decline GGR" (the caller skips writeGuides so the driver falls
+    // back loudly to its interconnect estimate), never a crash on a null/partial buffer.
+    bool setFromNets(std::vector<GrNet> &nets, int numPlPin_);
+    bool setToNets(std::vector<GrNet> &nets);
+    bool route(std::vector<GrNet> &nets, int iterleft);
     void setUnitViaMultiplier(float w);
     void setUnitVioCost(std::vector<float>& cost, float discount);
     void setLogisticSlope(float value);
