@@ -73,6 +73,10 @@ public:
     // Lets the placer treat soft halos as a reduced-weight density hint instead of a hard wall
     // (which over-counts blocked area and over-compresses std cells; see initializer soft weight).
     vector<char> placeBlockageIsSoft;
+    // Parallel to placeBlockages (WiseSyn WS2 P2h): the DEF `+ PARTIAL <maxDensity>` ceiling in
+    // (0,1] for a PARTIAL blockage rectangle, else -1 (hard or plain SOFT). Lets the placer cap
+    // the density INSIDE the rectangle at the DEF's own value instead of the global soft weight.
+    vector<float> placeBlockagePartialDensity;
 
     PowerNet* powerNet = nullptr;
 

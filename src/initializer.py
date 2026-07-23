@@ -31,6 +31,16 @@ def get_init_density_map(rawdb, gpdb, data: PlaceData, args, logger, ps=None):
             node_weight = torch.where(soft_mask, node_weight.new_full((), soft_w), node_weight)
             logger.info("Down-weighting %d soft placement-blockage (halo) node(s) to %.3f in the "
                         "fixed-density map." % (int(soft_mask.sum().item()), soft_w))
+    if gpdb is not None:
+        # WS2 P2h: a DEF `+ PARTIAL <maxDensity>` rectangle carries its OWN density ceiling —
+        # weight it (1 - maxDensity), a per-region cap that OVERRIDES the global soft weight for
+        # PARTIAL rects only (SOFT halos keep soft_w above; hard blockages keep weight 1).
+        pdens = gpdb.partial_blockage_density().to(node_weight.device)[lhs:rhs]
+        part_mask = pdens >= 0
+        if part_mask.any():
+            node_weight = torch.where(part_mask, (1.0 - pdens).clamp(0.0, 1.0), node_weight)
+            logger.info("Applying per-rectangle PARTIAL density ceilings to %d blockage node(s) "
+                        "(weight = 1 - maxDensity)." % int(part_mask.sum().item()))
     if ps is not None and ps.zero_macro_grad:
         # compute the mov + fixed macro density map
         num_mov_macro = int(data.is_mov_macro.sum().item())

@@ -155,6 +155,7 @@ void Database::reset() {
     routeBlockages.clear();
     placeBlockages.clear();
     placeBlockageIsSoft.clear();
+    placeBlockagePartialDensity.clear();
 
     powerNet = new PowerNet();
     siteMap = new SiteMap();

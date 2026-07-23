@@ -864,6 +864,23 @@ torch::Tensor GPDatabase::getSoftBlockageMask() {
     return mask;
 }
 
+torch::Tensor GPDatabase::getPartialBlockageDensity() {
+    // Per-node float, aligned like getSoftBlockageMask: the DEF `+ PARTIAL <maxDensity>` ceiling
+    // in (0,1] for a Blkg node whose originating blockage was PARTIAL, else -1 (WS2 P2h). The
+    // driver turns this into a per-rectangle density weight (1 - maxDensity), overriding the
+    // global soft-blockage weight for PARTIAL rects only.
+    torch::Tensor dens = torch::full({static_cast<int64_t>(nodes.size())}, -1.0f,
+                                     torch::TensorOptions().dtype(torch::kFloat));
+    auto dens_a = dens.accessor<float, 1>();
+    for (size_t i = 0; i < nodes.size(); i++) {
+        if (nodes[i].getNodeType() != "Blkg") continue;
+        index_type bid = nodes[i].getOriDBId();
+        if (bid >= 0 && bid < static_cast<index_type>(database.placeBlockagePartialDensity.size()))
+            dens_a[i] = database.placeBlockagePartialDensity[bid];
+    }
+    return dens;
+}
+
 void GPDatabase::applyOneNodeOrient(int node_id) {
     auto& node = nodes[node_id];
 

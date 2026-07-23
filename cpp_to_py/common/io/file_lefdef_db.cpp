@@ -1692,9 +1692,15 @@ int readDefBlockage(defrCallbackType_e c, defiBlockage* dblk, defiUserData ud) {
         // discouraged but not forbidden. Record the flag so the placer can weight them softly
         // instead of counting them as full hard-blocked area (which over-compresses std cells).
         const char is_soft = (dblk->hasSoft() || dblk->hasPartial()) ? 1 : 0;
+        // WS2 P2h: a PARTIAL blockage carries its OWN density ceiling — preserve it per rectangle
+        // (-1 = not PARTIAL) so the placer caps density inside the rect at the DEF's value rather
+        // than the global soft-blockage weight.
+        const float partial_density =
+            dblk->hasPartial() ? static_cast<float>(dblk->placementMaxDensity()) : -1.0f;
         for (int i = 0; i < dblk->defiBlockage::numRectangles(); ++i) {
             db->placeBlockages.emplace_back(dblk->xl(i), dblk->yl(i), dblk->xh(i), dblk->yh(i));
             db->placeBlockageIsSoft.push_back(is_soft);
+            db->placeBlockagePartialDensity.push_back(partial_density);
         }
     }
     return 0;
