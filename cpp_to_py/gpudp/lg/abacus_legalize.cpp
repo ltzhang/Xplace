@@ -135,12 +135,17 @@ void distributeMovableAndFixedCells2Bins(const float* x,
 
             bin_cells[bin_id].push_back(i);
         } else {
-            // fixed nodes may distribute to multiple bins
+            // multi-row movable and fixed nodes may distribute to multiple bins (rows). Use the
+            // tolerance-aware floorDiv/ceilDiv (rtol 1e-4), NOT raw truncation/ceil: when row_height is
+            // not an integer in the prescaled system (e.g. a PDK whose row_height/site_width is 24/7),
+            // an exact row boundary like 51.4286 = 15*row_height stores in float32 as 15.0000001, so a
+            // raw ceil rounds up to 16 and leaks a 2-row cell into a 3rd row it does not occupy —
+            // producing a spurious same-row overlap in the very next check.
             int node_id = i;
-            int bin_id_xl = std::max((x[node_id] - xl) / bin_size_x, (float)0);
-            int bin_id_xh = std::min((int)ceil((x[node_id] + node_size_x[node_id] - xl) / bin_size_x), num_bins_x);
-            int bin_id_yl = std::max((y[node_id] - yl) / bin_size_y, (float)0);
-            int bin_id_yh = std::min((int)ceil((y[node_id] + node_size_y[node_id] - yl) / bin_size_y), num_bins_y);
+            int bin_id_xl = std::max(floorDiv(x[node_id] - xl, bin_size_x), 0);
+            int bin_id_xh = std::min(ceilDiv(x[node_id] + node_size_x[node_id] - xl, bin_size_x), num_bins_x);
+            int bin_id_yl = std::max(floorDiv(y[node_id] - yl, bin_size_y), 0);
+            int bin_id_yh = std::min(ceilDiv(y[node_id] + node_size_y[node_id] - yl, bin_size_y), num_bins_y);
 
             for (int bin_id_x = bin_id_xl; bin_id_x < bin_id_xh; ++bin_id_x) {
                 for (int bin_id_y = bin_id_yl; bin_id_y < bin_id_yh; ++bin_id_y) {

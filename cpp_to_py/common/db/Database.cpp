@@ -753,19 +753,30 @@ Layer& Database::addLayer(const string& name, const char type) {
     layers.emplace_back(name, type);
     Layer& newlayer = layers.back();
     name_layers.emplace(name, &newlayer);
-    if (layers.size() == 1) {
-        if (type == 'r') {
-            newlayer.rIndex = 0;
-        }
-    } else {
+    if (layers.size() > 1) {
         Layer& oldlayer = layers[layers.size() - 2];
         oldlayer._above = &newlayer;
         newlayer._below = &oldlayer;
-        if (type == 'r') {
-            newlayer.rIndex = oldlayer.cIndex + 1;
-        } else {
-            newlayer.cIndex = oldlayer.rIndex;
-        }
+    }
+    // Assign a DENSE routing/cut index as a monotonic counter over already-added layers of the same
+    // kind, in stack order. The previous scheme derived a routing layer's rIndex from the cut below
+    // (`oldlayer.cIndex + 1`), which assumes a strictly alternating routing/cut stack from the bottom.
+    // That breaks on advanced stacks with a device-layer gap or two consecutive cut layers (e.g. gt2n's
+    // backside power-delivery stack: BRDL..BPR then device cuts VSD,VG then M0..M13) — the second cut
+    // has rIndex -1, so the next routing layer's rIndex wraps back to 0 and collides, leaving rIndex
+    // non-contiguous and getRLayer(l) NULL for the skipped indices (a hard crash downstream in GGR).
+    // Counting instead yields contiguous rIndex 0..N-1 for every routing layer regardless of stack
+    // shape, and is byte-identical to the old chaining for a standard alternating routing/cut stack.
+    if (type == 'r') {
+        int r = 0;
+        for (const Layer& l : layers)
+            if (l.rIndex != -1) ++r;  // newlayer.rIndex is still -1 here, so it is not counted
+        newlayer.rIndex = r;
+    } else if (type == 'c') {
+        int c = 0;
+        for (const Layer& l : layers)
+            if (l.cIndex != -1) ++c;
+        newlayer.cIndex = c;
     }
     return newlayer;
 }
