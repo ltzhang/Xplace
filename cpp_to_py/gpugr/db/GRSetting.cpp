@@ -10,8 +10,14 @@ void GRSetting::reset() {
     csrnScale = 0;
 
     rrrIters = 0;
+    rrrStallLimit = 2;
+    rrrMinRelGain = 0.02;
+    rrrVioEscalation = 2.0;
 
-    routeGuideFile = ""; 
+    viaResourceMode = 1;
+    capacityDerate = 0.0;
+
+    routeGuideFile = "";
 }
 
 GRSetting grSetting;

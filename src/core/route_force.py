@@ -386,8 +386,36 @@ def run_gr_and_fft(args, logger, data, rawdb, gpdb, ps, grdb=None, skip_m1_route
     ace_list, selected_rc = evaluate_routability(args, logger, cg_mapHV)
     rc_hor_mean, rc_ver_mean = selected_rc.mean(dim=1).tolist()
 
+    # Edge-level routability (WiseSyn R2-19). numOvflNets counts how far congestion REACHES -- one
+    # hot gcell crossed by 300 nets contributes 300 -- so it scales with design size rather than with
+    # how badly the design is congested, and a design can report thousands of "overflowing nets"
+    # while not one gcell edge carries excess demand. edge_ovfl is the magnitude, in tracks, against
+    # the same resource model the router optimized; report it first and keep the net count as the
+    # secondary diagnostic.
+    edge_ovfl = routeforce.edge_overflow()
+    max_edge_ovfl = routeforce.max_edge_overflow()
+    num_ovfl_edges = routeforce.num_ovfl_edges()
+    # Wire demand only, excluding the via resource -- the quantity that lines up with an external
+    # router's wire-demand congestion table (OpenROAD GRT's "Max H / Max V / Total Congestion").
+    wire_edge_ovfl = routeforce.wire_edge_overflow()
+    num_wire_ovfl_edges = routeforce.num_wire_ovfl_edges()
+    num_routable_edges = routeforce.num_routable_edges()
+    num_unrouted = routeforce.num_unrouted_nets()
+    via_mode, cap_derate = routeforce.resource_model()
+    rrr_passes, rrr_best, rrr_stop = routeforce.rrr_status()
+
     logger.info(
-        "#OvflNets: %d (%.2f%%), GR WL: %d, GR #Vias: %d, #EstShorts: %d, RC Hor: %.3f, RC Ver: %.3f" % (
+        "EdgeOvfl: %.2f tracks over %d / %d gcell edges (worst %.2f), WireOnly: %.2f over %d, "
+        "Unrouted: %d | "
+        "#OvflNets: %d (%.2f%%), GR WL: %d, GR #Vias: %d, #EstShorts: %d, RC Hor: %.3f, RC Ver: %.3f"
+        % (
+            edge_ovfl,
+            num_ovfl_edges,
+            num_routable_edges,
+            max_edge_ovfl,
+            wire_edge_ovfl,
+            num_wire_ovfl_edges,
+            num_unrouted,
             numOvflNets,
             numOvflNets / data.num_nets * 100,
             gr_wirelength,
@@ -397,8 +425,38 @@ def run_gr_and_fft(args, logger, data, rawdb, gpdb, ps, grdb=None, skip_m1_route
             rc_ver_mean,
         )
     )
+    # Per-layer resource / demand / overflow, in the same shape OpenROAD GRT's final congestion
+    # report uses, so the two routers' capacity models can be compared directly instead of through
+    # incomparable aggregate scores.
+    layer_ovfl = routeforce.layer_edge_overflow()
+    layer_max = routeforce.layer_max_edge_overflow()
+    cap_per_layer = cap_map.sum(dim=(1, 2)).tolist()
+    wire_per_layer = wire_dmd_map.sum(dim=(1, 2)).tolist()
+    via_per_layer = via_dmd_map.sum(dim=(1, 2)).tolist()
+    rows = ["Layer      Resource        Demand    (wire /   via)   Usage      EdgeOvfl   Worst"]
+    for i, cap in enumerate(cap_per_layer):
+        dmd = wire_per_layer[i] + via_per_layer[i]
+        rows.append(
+            "L%-8d %10.0f %12.0f (%8.0f/%7.0f) %7.2f%% %10.2f %7.2f"
+            % (i, cap, dmd, wire_per_layer[i], via_per_layer[i],
+               (100.0 * dmd / cap) if cap > 0 else 0.0,
+               layer_ovfl[i] if i < len(layer_ovfl) else 0.0,
+               layer_max[i] if i < len(layer_max) else 0.0))
+    tot_cap, tot_dmd = sum(cap_per_layer), sum(wire_per_layer) + sum(via_per_layer)
+    rows.append(
+        "Total      %10.0f %12.0f (%8.0f/%7.0f) %7.2f%% %10.2f %7.2f"
+        % (tot_cap, tot_dmd, sum(wire_per_layer), sum(via_per_layer),
+           (100.0 * tot_dmd / tot_cap) if tot_cap > 0 else 0.0, edge_ovfl, max_edge_ovfl))
+    logger.info("GGR congestion report:\n           " + "\n           ".join(rows))
+    logger.info(
+        "GGR resource model: via_mode=%d capacity_derate=%.3f | RRR: %d pass(es), kept iter %d, %s"
+        % (via_mode, cap_derate, rrr_passes, rrr_best, rrr_stop)
+    )
 
-    gr_metrics = (numOvflNets, gr_wirelength, gr_numVias, gr_numShorts, rc_hor_mean, rc_ver_mean)
+    # Appended, never reordered: existing consumers unpack the first six positionally.
+    gr_metrics = (numOvflNets, gr_wirelength, gr_numVias, gr_numShorts, rc_hor_mean, rc_ver_mean,
+                  edge_ovfl, max_edge_ovfl, num_ovfl_edges, num_routable_edges, num_unrouted,
+                  wire_edge_ovfl, num_wire_ovfl_edges)
 
     if visualize:
         title = "#OvflNets: %.2e, WL: %.2e, #Vias: %.2e\n#Shorts: %.2e, RC Hor: %.3f, RC Ver: %.3f " % (
@@ -564,7 +622,8 @@ def route_inflation(
         **kwargs
     )
     grdb, routeforce, input_mat, cg_mapHV, _, _, route_gradmat, gr_metrics = output
-    numOvflNets, gr_wirelength, gr_numVias, gr_numShorts, rc_hor_mean, rc_ver_mean = gr_metrics
+    # gr_metrics grew an edge-level tail (R2-19); this consumer only needs the leading six.
+    numOvflNets, gr_wirelength, gr_numVias, gr_numShorts, rc_hor_mean, rc_ver_mean = gr_metrics[:6]
 
     num_bin_x, num_bin_y = input_mat.shape[0], input_mat.shape[1]
     unit_len_x, unit_len_y = routeforce.gcell_steps()

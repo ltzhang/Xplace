@@ -62,9 +62,34 @@ public:
     std::vector<int> getLayerPitch();
     std::vector<int> getLayerWidth();
 
+    // Edge-level routability of the EMITTED solution (WiseSyn R2-19). This is the primary
+    // routability number; getNumOvflNets() is a secondary diagnostic that counts reach, not
+    // magnitude. Zeroed until a route completes, so a declined GGR never reads as clean -- callers
+    // must check that a guide was produced, exactly as before.
+    double getEdgeOverflow() const { return report.total_edge_ovfl; }
+    double getMaxEdgeOverflow() const { return report.max_edge_ovfl; }
+    long long getOverflowEdges() const { return report.ovfl_edges; }
+    double getWireEdgeOverflow() const { return report.wire_edge_ovfl; }
+    long long getWireOverflowEdges() const { return report.wire_ovfl_edges; }
+    long long getRoutableEdges() const { return report.routable_edges; }
+    int getUnroutedNets() const { return report.unrouted_nets; }
+    std::vector<double> getLayerEdgeOverflow() const { return report.layer_total; }
+    std::vector<double> getLayerMaxEdgeOverflow() const { return report.layer_max; }
+    // The resource model the numbers above were measured against, so a verdict is reproducible.
+    std::tuple<int, double> getResourceModel() const {
+        return {resource.via_mode, static_cast<double>(resource.capacity_derate)};
+    }
+    // How the rip-up loop ended: passes run, which pass was kept, why it stopped.
+    std::tuple<int, int, std::string> getRrrStatus() const { return {rrrPasses, rrrBestIter, rrrStop}; }
+
 private:
     gr::GRDatabase& grdb;
     gr::GPURouter router;
+    OverflowReport report{};
+    RouteResourceModel resource{};
+    int rrrPasses = 0;
+    int rrrBestIter = -1;
+    std::string rrrStop = "not run";
 };
 
 }  // namespace gr

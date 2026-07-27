@@ -56,7 +56,8 @@ _preload_nvrtc_builtins()
 
 
 def place(lef_paths, in_def, out_def, util, site="", seed=0, deterministic=True, route=False,
-          route_guide=None, soft_blockage_weight=None):
+          route_guide=None, soft_blockage_weight=None, capacity_derate=0.0, via_model=-1,
+          rrr_iters=-1):
     """Run xplace GPU global placement on ``in_def`` and copy the placed DEF to ``out_def``.
 
     When ``route`` is true, also run xplace's GPU global router (GGR) on the produced placement and
@@ -145,6 +146,17 @@ def place(lef_paths, in_def, out_def, util, site="", seed=0, deterministic=True,
             args.global_placement = False
             args.legalization = False
             args.detail_placement = False
+            # Routing-resource model + rip-up effort (WiseSyn R2-19). These decide what "over
+            # capacity" means, and the router optimizes against exactly the model its verdict is
+            # judged against; -1 / 0.0 keep the engine defaults.
+            ggr = {}
+            if capacity_derate:
+                ggr["capacity_derate"] = float(capacity_derate)
+            if via_model is not None and int(via_model) >= 0:
+                ggr["via_resource_mode"] = int(via_model)
+            if rrr_iters is not None and int(rrr_iters) >= 0:
+                ggr["rrrIters"] = int(rrr_iters)
+            args.ggr_params = ggr
 
         # run_placement_single returns (place_metrics, route_metrics); run_placement_main discards them.
         metrics = run_placement_single(args, setup_logger(args, sys.argv))
@@ -157,24 +169,34 @@ def place(lef_paths, in_def, out_def, util, site="", seed=0, deterministic=True,
             except (IndexError, TypeError, ValueError):
                 pass
         if route and route_metrics is not None:
-            # columns: #OvflNets, GR WL, GR #Vias, GR EstShort, RC Hor, RC Ver.
-            # ovfl_nets counts NETS touching an over-capacity gcell, against GGR's own capacity model
-            # (raw tracks, no derate, empirical via surcharge) — it is NOT an edge count and NOT
-            # comparable to OpenROAD GRT's congestion report. est_short and the ACE ratios rc_hor /
-            # rc_ver are the edge-level quantities, so report them alongside rather than letting the
-            # net count stand alone.
+            # columns: #OvflNets, GR WL, GR #Vias, GR EstShort, RC Hor, RC Ver, then the edge-level
+            # tail: edge_ovfl, max_edge_ovfl, ovfl_edges, routable_edges, unrouted_nets.
+            #
+            # edge_ovfl is the ROUTABILITY VERDICT: total over-capacity demand in tracks, summed over
+            # gcell edges, against the resource model the router itself optimized. ovfl_nets counts
+            # how far congestion reaches (one hot gcell crossed by 300 nets contributes 300), so it
+            # scales with design size rather than with severity — keep it, but never lead with it.
             try:
-                result["route"] = ("ovfl_nets=%s routed_wl=%s vias=%s est_short=%s rc_hor=%s rc_ver=%s"
-                                   % (route_metrics[0], route_metrics[1], route_metrics[2],
-                                      route_metrics[3], route_metrics[4], route_metrics[5]))
+                result["route"] = (
+                    "edge_ovfl=%s max_edge_ovfl=%s ovfl_edges=%s routable_edges=%s "
+                    "wire_edge_ovfl=%s wire_ovfl_edges=%s unrouted=%s "
+                    "ovfl_nets=%s routed_wl=%s vias=%s est_short=%s rc_hor=%s rc_ver=%s"
+                    % (route_metrics[6], route_metrics[7], route_metrics[8], route_metrics[9],
+                       route_metrics[11], route_metrics[12], route_metrics[10],
+                       route_metrics[0], route_metrics[1], route_metrics[2],
+                       route_metrics[3], route_metrics[4], route_metrics[5]))
             except (IndexError, TypeError):
                 result["route"] = "routed (metrics unavailable)"
             # Structured, so the caller never has to re-parse the human-readable summary to learn
             # whether the route it just accepted still has unresolved congestion.
-            try:
-                result["ovfl_nets"] = int(route_metrics[0])
-            except (IndexError, TypeError, ValueError):
-                pass
+            for key, idx, cast in (("ovfl_nets", 0, int), ("edge_ovfl", 6, float),
+                                   ("max_edge_ovfl", 7, float), ("ovfl_edges", 8, int),
+                                   ("routable_edges", 9, int), ("unrouted_nets", 10, int),
+                                   ("wire_edge_ovfl", 11, float), ("wire_ovfl_edges", 12, int)):
+                try:
+                    result[key] = cast(route_metrics[idx])
+                except (IndexError, TypeError, ValueError):
+                    pass
         if route:
             # Per-net routed wirelength (DBU) exported by run_gr_and_fft next to the guide, for
             # route-accurate RC readback. DEF nets are named "n<WiseDB net index>"; return integer

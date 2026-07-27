@@ -10,6 +10,7 @@
 #include "common/db/SNet.h"
 #include "common/db/Via.h"
 #include "io_parser/gp/GPDatabase.h"
+#include "gpugr/gr/RouteResource.h"
 
 namespace gr {
 
@@ -168,6 +169,9 @@ GRDatabase::GRDatabase(std::shared_ptr<db::Database> rawdb_, std::shared_ptr<gp:
     setupWireDist();
     // 4) init obs and mark obs
     setupObs();
+    // 4b) reserve part of each layer for pin access / local nets / NDR -- AFTER the obstruction pass,
+    // because the reservation comes out of the tracks that are actually free.
+    applyCapacityDerate();
     // 5) init gr nets
     setupGrNets();
     logger.info("Finish setting up grdb");
@@ -177,6 +181,9 @@ void GRDatabase::setupCapacity() {
     if (db::setting.BookshelfVariety != "") {
         return setupCapacityBookshelf();
     }
+    // A gcell edge's raw capacity is the number of routing tracks that cross it. The layer
+    // reservation is NOT applied here: it has to come out of the tracks that are actually free, and
+    // the obstruction usage is only known after setupObs(). See applyCapacityDerate().
     capacity.resize(gridGraphSize, 0);
     for (int i = 0; i < nLayers; i++) {
         if ((i & 1) ^ m1direction) {
@@ -184,7 +191,7 @@ void GRDatabase::setupCapacity() {
                 int cap = lower_bound(tracks[i].begin(), tracks[i].end(), gridlines[0][j + 1]) -
                           lower_bound(tracks[i].begin(), tracks[i].end(), gridlines[0][j]);
                 for (int k = 0; k < ySize; k++) {
-                    capacity[encodeId(i, j, k)] = cap;
+                    capacity[encodeId(i, j, k)] = static_cast<float>(cap);
                 }
             }
         } else {
@@ -192,7 +199,7 @@ void GRDatabase::setupCapacity() {
                 int cap = lower_bound(tracks[i].begin(), tracks[i].end(), gridlines[1][k + 1]) -
                           lower_bound(tracks[i].begin(), tracks[i].end(), gridlines[1][k]);
                 for (int j = 0; j < xSize; j++) {
-                    capacity[encodeId(i, j, k)] = cap;
+                    capacity[encodeId(i, j, k)] = static_cast<float>(cap);
                 }
             }
         }
@@ -218,6 +225,38 @@ void GRDatabase::setupCapacityBookshelf() {
             }
         }
     }
+}
+
+// Real global routers do not hand every routing track to signal routing: pin access, local
+// connections and non-default rules consume part of every layer, which is why OpenROAD's GRT is
+// driven with explicit per-layer adjustments. `capacityDerate` is that reservation.
+//
+// It reserves a fraction of the tracks that are FREE, not of the raw track count. Taking it off the
+// raw count instead would stack the reservation on top of the explicit obstructions already in
+// `fixedUsage` and could push effective capacity BELOW what obstructions alone consume -- producing
+// overflow on gcells that no routing decision can ever relieve. That was measured: a 0.25 derate on
+// asap7/riscv32i reported 80468 tracks of wire overflow that did not move by a single track across
+// 1, 4 and 12 rip-up passes, because it was pure double-counting rather than contention.
+//
+// Applied to the one capacity grid, so the router optimizes against exactly the capacity its
+// overflow verdict is judged against -- a router steering by one capacity and reporting against
+// another cannot converge.
+void GRDatabase::applyCapacityDerate() {
+    const float derate = clampDerate(static_cast<float>(grSetting.capacityDerate));
+    if (!(derate > 0.0f)) return;
+    if (fixedUsage.size() != capacity.size()) {
+        logger.warning("Capacity derate skipped: obstruction usage is not built yet (%zu vs %zu)",
+                       fixedUsage.size(), capacity.size());
+        return;
+    }
+    for (size_t i = 0; i < capacity.size(); i++) {
+        const float raw = capacity[i];
+        if (!(raw > 0.0f)) continue;
+        const float blocked = std::min(std::max(fixedUsage[i], 0.0f), raw);
+        capacity[i] = blocked + (raw - blocked) * (1.0f - derate);
+    }
+    logger.info("Routing capacity derate: %.2f of each layer's FREE tracks reserved (pin access / "
+                "local nets / NDR)", derate);
 }
 
 void GRDatabase::setupWireDist() {

@@ -34,6 +34,29 @@ bool loadGRParams(const pybind11::dict& kwargs) {
         gr::grSetting.rrrIters = kwargs["rrrIters"].cast<int>();
     }
 
+    if (kwargs.contains("rrr_stall_limit")) {
+        gr::grSetting.rrrStallLimit = kwargs["rrr_stall_limit"].cast<int>();
+    }
+
+    if (kwargs.contains("rrr_min_rel_gain")) {
+        gr::grSetting.rrrMinRelGain = kwargs["rrr_min_rel_gain"].cast<double>();
+    }
+
+    if (kwargs.contains("rrr_vio_escalation")) {
+        gr::grSetting.rrrVioEscalation = kwargs["rrr_vio_escalation"].cast<double>();
+    }
+
+    // Routing resource model (WiseSyn R2-19): what "over capacity" means. Scriptable so a policy can
+    // reproduce an old verdict (via_resource_mode = 0) or match a specific sign-off router's
+    // reservation (capacity_derate).
+    if (kwargs.contains("via_resource_mode")) {
+        gr::grSetting.viaResourceMode = kwargs["via_resource_mode"].cast<int>();
+    }
+
+    if (kwargs.contains("capacity_derate")) {
+        gr::grSetting.capacityDerate = kwargs["capacity_derate"].cast<double>();
+    }
+
     if (kwargs.contains("route_guide")) {
         gr::grSetting.routeGuideFile = kwargs["route_guide"].cast<std::string>();
     }
@@ -54,6 +77,19 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         .def(pybind11::init<std::shared_ptr<gr::GRDatabase>>())
         .def("run_ggr", &gr::RouteForce::run_ggr)
         .def("num_ovfl_nets", &gr::RouteForce::getNumOvflNets)
+        // Edge-level routability (WiseSyn R2-19) -- the primary routability numbers. num_ovfl_nets
+        // counts how FAR congestion reaches; these say how BAD it is, in tracks.
+        .def("edge_overflow", &gr::RouteForce::getEdgeOverflow)
+        .def("max_edge_overflow", &gr::RouteForce::getMaxEdgeOverflow)
+        .def("num_ovfl_edges", &gr::RouteForce::getOverflowEdges)
+        .def("wire_edge_overflow", &gr::RouteForce::getWireEdgeOverflow)
+        .def("num_wire_ovfl_edges", &gr::RouteForce::getWireOverflowEdges)
+        .def("num_routable_edges", &gr::RouteForce::getRoutableEdges)
+        .def("num_unrouted_nets", &gr::RouteForce::getUnroutedNets)
+        .def("layer_edge_overflow", &gr::RouteForce::getLayerEdgeOverflow)
+        .def("layer_max_edge_overflow", &gr::RouteForce::getLayerMaxEdgeOverflow)
+        .def("resource_model", &gr::RouteForce::getResourceModel)
+        .def("rrr_status", &gr::RouteForce::getRrrStatus)
         .def("gcell_steps", &gr::RouteForce::getGcellStep)
         .def("microns", &gr::RouteForce::getMicrons)
         .def("layer_pitch", &gr::RouteForce::getLayerPitch)

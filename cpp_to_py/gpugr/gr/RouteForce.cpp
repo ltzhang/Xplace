@@ -2,6 +2,7 @@
 #include "common/db/Database.h"
 #include "io_parser/gp/GPDatabase.h"
 #include "gpugr/db/GRDatabase.h"
+#include "gpugr/gr/RrrControl.h"
 
 namespace gr {
 
@@ -52,7 +53,8 @@ void RouteForce::run_ggr() {
     // we only need the PR segment, our current data structure unsupport MR route force
     // if rrrIters > 0, this router can only be used for congestion map computation or solution evaluation
     int runMazeRouteTimes = grSetting.rrrIters;
-    // Parameters
+    // A BUDGET, not a schedule. The loop below keeps the best pass and terminates when overflow
+    // stops improving, so this bounds the work rather than dictating the violation-cost ramp.
     int rrrIterLimit = 1 + runMazeRouteTimes;
     double _unitWireCostRaw = 0.5 * grdb.microns / grdb.m2pitch;
     double _unitViaCostRaw = 4;
@@ -77,6 +79,13 @@ void RouteForce::run_ggr() {
         return;
     }
     router.setMap(grdb.capacity, grdb.wireDist, grdb.fixedLength, grdb.fixedUsage);
+    // One resource model for the whole route: the cost functions the router optimizes and the
+    // predicate its overflow verdict uses must be the same thing (see gpugr/gr/RouteResource.h).
+    // capacity_derate has already been applied to grdb.capacity; it rides along for reporting.
+    resource = RouteResourceModel();
+    resource.via_mode = grSetting.viaResourceMode;
+    resource.capacity_derate = static_cast<float>(grSetting.capacityDerate);
+    router.setResourceModel(resource);
 
     std::vector<float> _unitShortVioCost(grdb.nLayers), _unitShortVioCostDiscounted(grdb.nLayers);
     if (!router.setFromNets(grdb.grNets, grdb.gpdb.getPins().size())) {
@@ -92,15 +101,28 @@ void RouteForce::run_ggr() {
             _unitShortVioCostRaw * grdb.layerWidth[i] * grdb.microns / grdb.m2pitch / grdb.m2pitch / _unitWireCostRaw;
     }
     double tot_time = 0;
+    // Rip-up-and-reroute, congestion-converging (WiseSyn R2-19, see gpugr/gr/RrrControl.h):
+    //   * the violation-cost ramp is indexed by the ITERATION, not by the iteration budget, so
+    //     asking for more passes never softens an earlier one, and it escalates past the nominal
+    //     cost so congestion eventually dominates wirelength;
+    //   * the best pass is kept and emitted, so a pass that makes things worse is discarded rather
+    //     than shipped -- "more effort must not increase overflow" is then structural;
+    //   * the loop terminates on convergence (clean, or no longer improving) instead of running a
+    //     fixed count with its `break` commented out.
+    RrrController rrr(rrrIterLimit, grSetting.rrrStallLimit, grSetting.rrrMinRelGain);
+    std::vector<int> bestRoutes;
+    bool haveSnapshot = false;
     for (int iter = 0; iter < rrrIterLimit; iter++) {
-        router.setLogisticSlope(1 << iter);
-        router.setUnitVioCost(_unitShortVioCost, 0.1);
+        // Bounded: the logistic slope feeds a shift, and an unbounded budget would shift past the
+        // width of an int.
+        router.setLogisticSlope(static_cast<float>(1 << std::min(iter, 20)));
+        const double vioScale =
+            RrrController::vioCostScale(iter, rrrInitVioCostDiscount, grSetting.rrrVioEscalation);
+        router.setUnitVioCost(_unitShortVioCost, static_cast<float>(vioScale));
         if (iter == 0) {
             router.setUnitViaMultiplier(1);
         } else {
             router.setUnitViaMultiplier(std::max(100 / pow(5, iter - 1), 4.0));
-            router.setUnitVioCost(_unitShortVioCost,
-                                  rrrInitVioCostDiscount + (1.0 - rrrInitVioCostDiscount) / (rrrIterLimit - 1) * iter);
         }
         utils::timer T;
         T.start();
@@ -112,8 +134,44 @@ void RouteForce::run_ggr() {
             return;
         }
         tot_time += T.elapsed();
-        logger.info("##### GPU Routing Iter: %d Time: %.4f #####", iter, T.elapsed());
-        // break;
+        const OverflowReport& rep = router.getOverflow();
+        RrrScore score;
+        score.unrouted_nets = rep.unrouted_nets;
+        score.edge_overflow = rep.total_edge_ovfl;
+        const bool isBest = rrr.record(iter, score);
+        if (isBest) {
+            // Snapshot so a later, worse pass can be discarded. A failed snapshot is not fatal --
+            // it only means this pass cannot be restored later — but it must be visible.
+            if (router.snapshotRoutes(bestRoutes)) {
+                haveSnapshot = true;
+            } else {
+                logger.warning(
+                    "GGR could not snapshot iteration %d's routes; later passes can no longer be "
+                    "rolled back to it.", iter);
+            }
+        }
+        logger.info("##### GPU Routing Iter: %d Time: %.4f | edge overflow %.2f tracks, unrouted %d "
+                    "| best iter %d (%.2f tracks) %s #####",
+                    iter, T.elapsed(), score.edge_overflow, rep.unrouted_nets, rrr.bestIter(),
+                    rrr.best().edge_overflow, isBest ? "<- kept" : "(discarded)");
+        if (rrr.shouldStop()) {
+            logger.info("GGR rip-up-and-reroute stopped after %d pass(es): %s", rrr.itersRun(),
+                        RrrController::stopText(rrr.stopReason()));
+            break;
+        }
+    }
+    // Emit the BEST pass, not the last one. Restoring it rebuilds the demand grids too, so the
+    // congestion maps, the overflow report and the guide all describe the same solution.
+    if (haveSnapshot && rrr.bestIter() != rrr.itersRun() - 1) {
+        if (!router.restoreRoutes(bestRoutes, grdb.grNets)) {
+            logger.warning("GGR skipped: could not restore the best routing pass (iteration %d); "
+                           "declining rather than emitting a guide whose reported congestion "
+                           "belongs to a different solution.", rrr.bestIter());
+            logger.reset_logger();
+            return;
+        }
+        logger.info("GGR kept iteration %d (edge overflow %.2f tracks) over the last pass.",
+                    rrr.bestIter(), rrr.best().edge_overflow);
     }
     if (!router.setToNets(grdb.grNets)) {
         // P2g: the route read-back failed — the routes buffer would be garbage; decline (#7).
@@ -122,6 +180,10 @@ void RouteForce::run_ggr() {
         logger.reset_logger();
         return;
     }
+    report = router.getOverflow();
+    rrrPasses = rrr.itersRun();
+    rrrBestIter = rrr.bestIter();
+    rrrStop = RrrController::stopText(rrr.stopReason());
     logger.info("Total GPU Routing time: %.4f", tot_time);
 
     if (grSetting.routeGuideFile != "") {

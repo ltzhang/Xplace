@@ -46,14 +46,14 @@ __global__ void getDmdTensor(
     torch::PackedTensorAccessor32<float, 3, torch::RestrictPtrTraits> dmdMap,
     torch::PackedTensorAccessor32<float, 3, torch::RestrictPtrTraits> wireDmdMap,
     torch::PackedTensorAccessor32<float, 3, torch::RestrictPtrTraits> viaDmdMap,
-    const float *capacity, int *wires, int *vias, float *fixed, int N, int LAYER, int xSize, int ySize, int DIRECTION) {
+    const float *capacity, int *wires, int *vias, float *fixed, int N, int LAYER, int xSize, int ySize, int DIRECTION, RouteResourceModel model) {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
     if(idx < LAYER * N * N && idx % N + 1 < N) {
         int layer = idx / N / N, x = idx / N % N, y = idx % N;
         if (!(layer & 1) ^ DIRECTION) cudaSwapInt(x, y);
         if (layer < LAYER && x < xSize && y < ySize) {
             float wireDmd = wires[idx] + fixed[idx];
-            float viaDmd = twoCellsViaUsage(idx, vias, N, LAYER);
+            float viaDmd = twoCellsViaUsage(idx, vias, capacity, N, LAYER, model);
             dmdMap[layer][x][y] = wireDmd + viaDmd;
             wireDmdMap[layer][x][y] = wireDmd;
             viaDmdMap[layer][x][y] = viaDmd;
@@ -394,7 +394,7 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> GPURouter::getDemandMap(
         dmdMap.packed_accessor32<float, 3, torch::RestrictPtrTraits>(),
         wireDmdMap.packed_accessor32<float, 3, torch::RestrictPtrTraits>(),
         viaDmdMap.packed_accessor32<float, 3, torch::RestrictPtrTraits>(),
-        capacity, wires, vias, fixed, N, LAYER, xSize, ySize, DIRECTION);
+        capacity, wires, vias, fixed, N, LAYER, xSize, ySize, DIRECTION, resourceModel);
     return {dmdMap, wireDmdMap, viaDmdMap};
 }
 

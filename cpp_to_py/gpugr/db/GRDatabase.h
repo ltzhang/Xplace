@@ -82,6 +82,9 @@ public:
     ~GRDatabase();
 
     void setupCapacity();
+    // Reserve part of each layer's FREE tracks (see the comment on the definition). Must run AFTER
+    // setupObs(), which is what fills fixedUsage.
+    void applyCapacityDerate();
     void setupCapacityBookshelf();
     void setupWireDist();
 

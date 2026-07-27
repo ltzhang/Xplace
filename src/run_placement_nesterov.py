@@ -495,8 +495,12 @@ def run_nesterov_placement_on_data(data, rawdb, gpdb, args, logger, params):
             args, logger, data, rawdb, gpdb, ps, 
             report_gr_metrics_only=True,
             skip_m1_route=True, given_gr_params={
+                # Rip-up BUDGET. The loop keeps the best pass and stops on convergence, so raising
+                # this cannot increase the reported overflow (WiseSyn R2-19).
                 "rrrIters": 1,
                 "route_guide": os.path.join(args.result_dir, args.exp_id, args.output_dir, "%s_%s.guide" %(args.output_prefix, args.design_name)),
+                # Caller-supplied routing-resource model / effort overrides, if any.
+                **getattr(args, "ggr_params", {}),
             }
         )
 

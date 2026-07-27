@@ -1,5 +1,6 @@
 #pragma once
 #include "common/common.h"
+#include "gpugr/gr/RouteResource.h"
 
 namespace gr {
 
@@ -13,8 +14,14 @@ __device__ __forceinline__ int inCellViaUsage(int idx, int *vias, int N, int LAY
     return ans;
 }
 
-__device__ __forceinline__ float twoCellsViaUsage(int idx, int *vias, int N, int LAYER) {
-    return sqrt(0.5 * (inCellViaUsage(idx, vias, N, LAYER) + inCellViaUsage(idx + 1, vias, N, LAYER))) * 1.5;
+// Via demand charged to the gcell edge `idx`, in TRACKS. The conversion from via landings to tracks
+// lives in RouteResource.h (see the comment there for why it is not a sqrt surcharge any more).
+__device__ __forceinline__ float twoCellsViaUsage(
+    int idx, int *vias, const float *capacity, int N, int LAYER, const RouteResourceModel &model) {
+    return viaEdgeDemand(static_cast<float>(inCellViaUsage(idx, vias, N, LAYER)),
+                         static_cast<float>(inCellViaUsage(idx + 1, vias, N, LAYER)),
+                         capacity[idx],
+                         model);
 }
 
 __device__ __forceinline__ float inCellUsedArea(int idx, int *wires, float *fixed, int N) {
@@ -29,12 +36,21 @@ __device__ __forceinline__ float inCellViaCost(
     return 1.0 / (1.0 + myExp(logisticSlope * (capacity[idx] - inCellUsedArea(idx, wires, fixed, N))));
 }
 
-__device__ __forceinline__ float cellResource(
-    int idx, int *wires, float *fixed, int *vias, const float *capacity, int N, int LAYER) {
+__device__ __forceinline__ float cellResource(int idx,
+                                              int *wires,
+                                              float *fixed,
+                                              int *vias,
+                                              const float *capacity,
+                                              int N,
+                                              int LAYER,
+                                              const RouteResourceModel &model) {
     float ans = wires[idx] + fixed[idx];
     if (idx % N) ans += wires[idx - 1] + fixed[idx - 1];
     ans /= 2;
-    ans += sqrt(1.0 * inCellViaUsage(idx, vias, N, LAYER)) * 1.5;
+    ans += viaEdgeDemand(static_cast<float>(inCellViaUsage(idx, vias, N, LAYER)),
+                         static_cast<float>(inCellViaUsage(idx, vias, N, LAYER)),
+                         capacity[idx],
+                         model);
     return capacity[idx] - ans;
 }
 

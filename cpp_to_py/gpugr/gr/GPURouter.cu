@@ -53,6 +53,8 @@ bool GPURouter::initialize(int device_id, int layer, int x, int y, int N_, int c
     capacity = wireDist = fixedLength = fixed = cell_resource = unitShortCostDiscounted = nullptr;
     viaCost = cost = nullptr;
     costSum = nullptr;
+    layerOvflTotal = layerOvflMax = nullptr;
+    edgeOvflCounters = nullptr;
     // Macro-aware GGR: large hard macros force a big die -> large gcell grid, so the per-batch dist/prev
     // arrays sized (MAX_BATCH_SIZE+6)*gridGraphSize can exceed INT_MAX. gridGraphSize itself (LAYER*N*N,
     // ~36M at N<=2000) fits int32, but the batch-scaled products below overflow int32 BEFORE the sizeof
@@ -78,6 +80,11 @@ bool GPURouter::initialize(int device_id, int layer, int x, int y, int N_, int c
     GGR_CK(cudaMalloc(&isOverflowVia, gridGraphSize * sizeof(int)));
     GGR_CK(cudaMalloc(&unitShortCostDiscounted, LAYER * sizeof(float)));
     GGR_CK(cudaMallocManaged(&allpins, MAX_BATCH_SIZE * MAX_PIN_SIZE_PER_NET * sizeof(int)));
+    // Edge-overflow accumulators (WiseSyn R2-19): 2*LAYER doubles + 2 counters, negligible next to
+    // the per-batch dist/prev arrays but allocated through the same checked path.
+    GGR_CK(cudaMallocManaged(&layerOvflTotal, 2 * LAYER * sizeof(double)));
+    GGR_CK(cudaMallocManaged(&layerOvflMax, LAYER * sizeof(double)));
+    GGR_CK(cudaMallocManaged(&edgeOvflCounters, 3 * sizeof(unsigned long long)));
     return true;
 }
 
@@ -101,6 +108,9 @@ GPURouter::~GPURouter() {
     cudaFree(isOverflowVia);
     cudaFree(unitShortCostDiscounted);
     cudaFree(allpins);
+    cudaFree(layerOvflTotal);
+    cudaFree(layerOvflMax);
+    cudaFree(edgeOvflCounters);
 
     if(pins != nullptr) cudaFree(pins);
     if(pinNum != nullptr) cudaFree(pinNum);
@@ -149,10 +159,10 @@ void GPURouter::setMap(const std::vector<float> &cap, const std::vector<float> &
     copy(fix, fixed);
 }
 
-__global__ void calculateCellResource(float *cell_resource, int *wires, float *fixed, int *vias, const float *capacity, int N, int LAYER, int tot) {
+__global__ void calculateCellResource(float *cell_resource, int *wires, float *fixed, int *vias, const float *capacity, int N, int LAYER, int tot, RouteResourceModel model) {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
     if(idx >= tot) return;
-    cell_resource[idx] = cellResource(idx, wires, fixed, vias, capacity, N, LAYER);
+    cell_resource[idx] = cellResource(idx, wires, fixed, vias, capacity, N, LAYER, model);
 }
 
 __global__ void calculateCoarseCost(float *cell_resource, int *cost, int *wires, float *fixed, int *vias, float *capacity, int N, int xsize, int ysize, int X, int Y, int LAYER, int DIRECTION, int COARSENING_SCALE) {
@@ -336,7 +346,7 @@ __global__ void traceBack(int *modifiedWire, int *modifiedVia, dtype *dist, int 
 }
 */
 
-__global__ void calculateWireCost(dtype *cost, float *wireDist, float *fixed, float *fixedLength, int *wires, int *vias, float *capacity, float *unitShortCost, float logisticSlope, int N, int LAYER) {
+__global__ void calculateWireCost(dtype *cost, float *wireDist, float *fixed, float *fixedLength, int *wires, int *vias, float *capacity, float *unitShortCost, float logisticSlope, int N, int LAYER, RouteResourceModel model) {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
     if(!(idx < LAYER * N * N && idx % N + 1 < N)) return;
     if(capacity[idx] < 0.01) {
@@ -344,7 +354,7 @@ __global__ void calculateWireCost(dtype *cost, float *wireDist, float *fixed, fl
         return;
     }
     int expectedLen = (fixed[idx] * fixedLength[idx] + wires[idx] * wireDist[idx]) / capacity[idx];
-    float remain = capacity[idx] - (fixed[idx] + wires[idx] + 1 + twoCellsViaUsage(idx, vias, N, LAYER));
+    float remain = capacity[idx] - (fixed[idx] + wires[idx] + 1 + twoCellsViaUsage(idx, vias, capacity, N, LAYER, model));
     //if(idx == 2 * N * N + 63)
     //    for(int i = 0; i < 9; i++)
     //    printf("%d unit %.2lf\n", i, unitShortCost[i]);
@@ -381,10 +391,47 @@ __global__ void markUnrouteUsage(int *pins, int *vias, int cnt) {
     if(cur < cnt) atomicAdd(vias + pins[cur], 1);
 }
 
-__global__ void markOverflowWires(const float *capacity, int *wires, int *vias, float *fixed, int *isOverflow, int N, int LAYER) {
+// How much gcell edge `idx` is over capacity, in tracks (0 when it fits). Single source of truth:
+// the boolean per-net marking and the magnitude reduction below must never disagree about what
+// "over capacity" means.
+__device__ __forceinline__ float wireEdgeOverflow(
+    int idx, const float *capacity, int *wires, int *vias, float *fixed, int N, int LAYER, const RouteResourceModel &model) {
+    return edgeOverflow(wires[idx] + fixed[idx],
+                        twoCellsViaUsage(idx, vias, capacity, N, LAYER, model),
+                        capacity[idx]);
+}
+
+__global__ void markOverflowWires(const float *capacity, int *wires, int *vias, float *fixed, int *isOverflow, int N, int LAYER, RouteResourceModel model) {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
-    if(idx < LAYER * N * N && idx % N + 1 < N) 
-        isOverflow[idx] = (wires[idx] + fixed[idx] + twoCellsViaUsage(idx, vias, N, LAYER) > capacity[idx]);
+    if(idx < LAYER * N * N && idx % N + 1 < N)
+        isOverflow[idx] = (wireEdgeOverflow(idx, capacity, wires, vias, fixed, N, LAYER, model) > 0.0f);
+}
+
+// Per-layer reduction of the SAME per-edge overflow the marking uses. Edges with no capacity are
+// not routable resources and are excluded from both the total and the denominator, so a padded grid
+// cannot manufacture overflow.
+__global__ void reduceEdgeOverflow(const float *capacity, int *wires, int *vias, float *fixed,
+                                   double *layerTotal, double *layerMax,
+                                   unsigned long long *counters, int N, int LAYER, RouteResourceModel model) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if(!(idx < LAYER * N * N && idx % N + 1 < N)) return;
+    if(!(capacity[idx] > 0.0f)) return;
+    const int layer = idx / N / N;
+    atomicAdd(counters + 1, 1ULL);
+    // Wire-only, reported alongside so the verdict can be compared like-for-like with an external
+    // router's wire-demand congestion table.
+    const float wireOnly = edgeOverflow(wires[idx] + fixed[idx], 0.0f, capacity[idx]);
+    if(wireOnly > 0.0f) {
+        atomicAdd(counters + 2, 1ULL);
+        atomicAdd(layerTotal + LAYER + layer, (double)wireOnly);
+    }
+    const float ovfl = wireEdgeOverflow(idx, capacity, wires, vias, fixed, N, LAYER, model);
+    if(!(ovfl > 0.0f)) return;
+    atomicAdd(counters, 1ULL);
+    atomicAdd(layerTotal + layer, (double)ovfl);
+    // Non-negative doubles order identically to their unsigned-long-long bit patterns, so a plain
+    // integer atomicMax is an exact max here (CUDA has no double atomicMax).
+    atomicMax((unsigned long long *)(layerMax + layer), (unsigned long long)__double_as_longlong((double)ovfl));
 }
 
 __global__ void markOverflowVias(const float *capacity, int *wires, int *vias, float *fixed, int *isOverflow, int N, int LAYER) {
@@ -401,8 +448,11 @@ __global__ void markOverflowNets(int *isOverflowVia, int *isOverflowWire, int *i
     routes += routesOffset[idx];
     isOverflowNet[idx] = 0;
     if(routes[0] == -1) {
-        // printf("resolving failed net from pattern routing. netId: %d\n", idx);
-        isOverflowNet[idx] = 1;
+        // Routing failed outright for this net. Marked 2 rather than 1 so the host can separate
+        // "unrouted" from "routed across a congested gcell": a solution that leaves nets unrouted
+        // must never be preferred over one that resolves them, however low its congestion reads.
+        // Everything downstream tests this value for nonzero, so the rip-up path is unchanged.
+        isOverflowNet[idx] = 2;
         return;
     }
     //if(routes[0] == 0) return;
@@ -420,15 +470,20 @@ __global__ void markOverflowNets(int *isOverflowVia, int *isOverflowWire, int *i
     }
 }
 
+// Rebuild the wire/via demand grids from a route array. Segment encoding matches setToNets exactly:
+// length > 0 is a wire run, -1 is a via, anything else is not a segment.
 __global__ void commit(int *routes, int *routesOffset, int *wires, int *vias, int NET_NUM) {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
     if(idx >= NET_NUM) return;
     routes += routesOffset[idx];
-    for(int i = 1; i < routes[0]; i += 2) if(routes[i + 1] > 0) {
-        for(int j = 0; j < routes[i + 1]; j++)
-            atomicAdd(wires + routes[i] + j, 1);
-    } else
-        atomicAdd(vias + routes[i], 1);
+    for(int i = 1; i < routes[0]; i += 2) {
+        if(routes[i + 1] > 0) {
+            for(int j = 0; j < routes[i + 1]; j++)
+                atomicAdd(wires + routes[i] + j, 1);
+        } else if(routes[i + 1] == -1) {
+            atomicAdd(vias + routes[i], 1);
+        }
+    }
 }
 
 __global__ void ripupOverflowNets(int *isOverflowNet, int *routes, int *routesOffset, int *wires, int *vias, int NET_NUM) {
@@ -821,7 +876,7 @@ bool GPURouter::route(std::vector<GrNet> &nets, int iter) {
     // int batch_cnt = 0;
     double mrtime = 0, costtime = 0;
     for(auto batchSize : batchSizes) {
-        calculateWireCost<<<BLOCK_NUMBER(LAYER * N * N), BLOCK_SIZE>>> (cost, wireDist, fixed, fixedLength, wires, vias, capacity, unitShortCostDiscounted, logisticSlope, N, LAYER);
+        calculateWireCost<<<BLOCK_NUMBER(LAYER * N * N), BLOCK_SIZE>>> (cost, wireDist, fixed, fixedLength, wires, vias, capacity, unitShortCostDiscounted, logisticSlope, N, LAYER, resourceModel);
         calculateViaCost<<<BLOCK_NUMBER((LAYER - 1) * N * N), BLOCK_SIZE>>> (wires, fixed, capacity, viaCost, unitViaMultiplier, unitViaCost, logisticSlope, N, LAYER);   
         calculateCostSum<<<N, N / 2, N * sizeof(int64_t)>>> (LAYER, N, cost, costSum);
         if(iter == 0) {
@@ -856,7 +911,7 @@ bool GPURouter::route(std::vector<GrNet> &nets, int iter) {
             
             prtime += clock() - t;
         } else {
-            calculateCellResource<<<BLOCK_NUMBER(LAYER * N * N), BLOCK_SIZE>>> (cell_resource, wires, fixed, vias, capacity, N, LAYER, LAYER * N * N);
+            calculateCellResource<<<BLOCK_NUMBER(LAYER * N * N), BLOCK_SIZE>>> (cell_resource, wires, fixed, vias, capacity, N, LAYER, LAYER * N * N, resourceModel);
             calculateCoarseCost<<<LAYER * cgxsize, cgysize>>> (cell_resource, gpuMR.cost, wires, fixed, vias, capacity, N, cgxsize, cgysize, X, Y, LAYER, DIRECTION, COARSENING_SCALE);    
             calculateCoarseVia<<<(LAYER - 1) * cgxsize, cgysize>>> (cell_resource, gpuMR.via, wires, fixed, vias, capacity, N, LAYER, cgxsize, cgysize, X, Y, DIRECTION, COARSENING_SCALE);
             gpuMR.run(DIRECTION, iter);
@@ -906,19 +961,77 @@ bool GPURouter::route(std::vector<GrNet> &nets, int iter) {
     
     //gpuMR.query();
     //if(iter == db::setting.rrrIterLimit - 1) {
-    if(1) {
-        markOverflowWires<<<BLOCK_NUMBER(LAYER * N * N), BLOCK_SIZE>>> (capacity, wires, vias, fixed, isOverflowWire, N, LAYER);
+    recomputeOverflow(nets);
+    return true;
+}
+
+void GPURouter::recomputeOverflow(std::vector<GrNet> &nets) {
+    {
+        markOverflowWires<<<BLOCK_NUMBER(LAYER * N * N), BLOCK_SIZE>>> (capacity, wires, vias, fixed, isOverflowWire, N, LAYER, resourceModel);
         markOverflowVias<<<BLOCK_NUMBER((LAYER - 1) * N * N), BLOCK_SIZE>>> (capacity, wires, vias, fixed, isOverflowVia, N, LAYER);
         markOverflowNets<<<BLOCK_NUMBER(NET_NUM), BLOCK_SIZE>>> (isOverflowVia, isOverflowWire, isOverflowNet, routes, routesOffset, NET_NUM);
+        // Edge-level magnitude, reduced per layer, from the same predicate the marking uses.
+        cudaMemset(layerOvflTotal, 0, 2 * LAYER * sizeof(double));
+        cudaMemset(layerOvflMax, 0, LAYER * sizeof(double));
+        cudaMemset(edgeOvflCounters, 0, 3 * sizeof(unsigned long long));
+        reduceEdgeOverflow<<<BLOCK_NUMBER(LAYER * N * N), BLOCK_SIZE>>> (
+            capacity, wires, vias, fixed, layerOvflTotal, layerOvflMax, edgeOvflCounters, N, LAYER, resourceModel);
         cudaDeviceSynchronize();
-        int cnt = 0;
-        for(size_t netId = 0; netId < nets.size(); netId++) 
+        int cnt = 0, unrouted = 0;
+        for(size_t netId = 0; netId < nets.size(); netId++)
             if(isOverflowNet[netId]) {
                 cnt++;
+                if(isOverflowNet[netId] == 2) unrouted++;
                 if(nets[netId].noroute) printf("ERROR: net %zu is noroute but overflow\n", netId);
             }
-        logger.info("Final Overflow Net Number: %d", cnt);
         numOvflNets = cnt;
+        overflow = OverflowReport{};
+        overflow.ovfl_nets = cnt;
+        overflow.unrouted_nets = unrouted;
+        overflow.ovfl_edges = (long long)edgeOvflCounters[0];
+        overflow.routable_edges = (long long)edgeOvflCounters[1];
+        overflow.wire_ovfl_edges = (long long)edgeOvflCounters[2];
+        overflow.layer_total.assign(layerOvflTotal, layerOvflTotal + LAYER);
+        overflow.layer_max.assign(layerOvflMax, layerOvflMax + LAYER);
+        for(int l = 0; l < LAYER; l++) {
+            overflow.total_edge_ovfl += overflow.layer_total[l];
+            overflow.wire_edge_ovfl += layerOvflTotal[LAYER + l];
+            if(overflow.layer_max[l] > overflow.max_edge_ovfl) overflow.max_edge_ovfl = overflow.layer_max[l];
+        }
+        // Edge overflow is the routability verdict; the net count is the secondary diagnostic.
+        logger.info("Edge overflow: %.2f tracks over %lld of %lld gcell edges (worst edge %.2f); "
+                    "wire-only %.2f over %lld edges | ovfl nets: %d (unrouted %d)",
+                    overflow.total_edge_ovfl, overflow.ovfl_edges, overflow.routable_edges,
+                    overflow.max_edge_ovfl, overflow.wire_edge_ovfl, overflow.wire_ovfl_edges,
+                    cnt, unrouted);
+    }
+}
+
+bool GPURouter::restoreRoutes(const std::vector<int> &snapshot, std::vector<GrNet> &nets) {
+    if(routes == nullptr || routesOffsetCPU == nullptr) return false;
+    if(snapshot.size() != (size_t)routesOffsetCPU[NET_NUM]) return false;
+    // Put the kept pass back on the device and rebuild the demand grids from it, so the congestion
+    // maps, the overflow report and the emitted guide all describe the SAME solution. Reporting a
+    // discarded pass's congestion for an emitted route would be exactly the kind of plausible-but-
+    // wrong result this work exists to remove.
+    if(cudaMemcpy(routes, snapshot.data(), sizeof(int) * snapshot.size(), cudaMemcpyHostToDevice) != cudaSuccess)
+        return false;
+    const int64_t gridGraphSize = (int64_t)LAYER * N * N;
+    if(cudaMemset(wires, 0, sizeof(int) * gridGraphSize) != cudaSuccess) return false;
+    if(cudaMemset(vias, 0, sizeof(int) * gridGraphSize) != cudaSuccess) return false;
+    commit<<<BLOCK_NUMBER(NET_NUM), BLOCK_SIZE>>> (routes, routesOffset, wires, vias, NET_NUM);
+    if(cudaDeviceSynchronize() != cudaSuccess) return false;
+    recomputeOverflow(nets);
+    return true;
+}
+
+bool GPURouter::snapshotRoutes(std::vector<int> &out) {
+    if(routes == nullptr || routesOffsetCPU == nullptr) return false;
+    out.resize(routesOffsetCPU[NET_NUM]);
+    if(cudaMemcpy(out.data(), routes, sizeof(int) * routesOffsetCPU[NET_NUM], cudaMemcpyDeviceToHost)
+       != cudaSuccess) {
+        out.clear();
+        return false;
     }
     return true;
 }
@@ -973,13 +1086,29 @@ bool GPURouter::setFromNets(std::vector<GrNet> &nets, int numPlPin_) {
     return true;
 }
 
-bool GPURouter::setToNets(std::vector<GrNet> &nets) {
+bool GPURouter::setToNets(std::vector<GrNet> &nets, const std::vector<int> *routesOverride) {
     // P2g: vector (not new[]) so the checked-copy early return cannot leak; an unchecked D2H copy
     // here previously read back garbage routes on failure instead of declining.
-    std::vector<int> routesCPUBuf(routesOffsetCPU[NET_NUM]);
+    std::vector<int> routesCPUBuf;
+    // R2-19: read back the BEST iteration's routes when the rip-up loop kept a snapshot, not
+    // whatever the last pass happened to leave on the device. A snapshot of the wrong length would
+    // mean reading past its end, so an ill-sized one is refused rather than trusted.
+    if (routesOverride != nullptr &&
+        routesOverride->size() == static_cast<size_t>(routesOffsetCPU[NET_NUM])) {
+        routesCPUBuf = *routesOverride;
+    } else {
+        if (routesOverride != nullptr) {
+            std::cerr << "ERROR: GGR route snapshot has the wrong size ("
+                      << routesOverride->size() << " vs " << routesOffsetCPU[NET_NUM]
+                      << "); declining the route rather than reading past it\n";
+            return false;
+        }
+        routesCPUBuf.resize(routesOffsetCPU[NET_NUM]);
+        GGR_CK(cudaMemcpy(routesCPUBuf.data(), routes, sizeof(int) * routesOffsetCPU[NET_NUM],
+                          cudaMemcpyDeviceToHost));
+    }
     int *routesCPU = routesCPUBuf.data();
     int mx = 0;
-    GGR_CK(cudaMemcpy(routesCPU, routes, sizeof(int) * routesOffsetCPU[NET_NUM], cudaMemcpyDeviceToHost));
     int num_net_use_too_many_route = 0;
     for(size_t netId = 0; netId < nets.size(); netId++) {
         std::vector<int> wires, vias;

@@ -583,7 +583,7 @@ class ParamScheduler:
         best_sol = None
         best_gr_metrics = None
         for idx, (gr_metrics, hpwl, overflow, mov_node_pos) in enumerate(self.gr_sol_recorder):
-            numOvflNets, gr_wirelength, gr_numVias, gr_numShorts, rc_hor_mean, rc_ver_mean = gr_metrics
+            numOvflNets, gr_wirelength, gr_numVias, gr_numShorts, rc_hor_mean, rc_ver_mean = gr_metrics[:6]
             if gr_numShorts < best_value:
                 # NOTE: I think gr_numShorts is the most important metric...
                 best_value = gr_numShorts
@@ -597,7 +597,7 @@ class ParamScheduler:
             #     best_idx = idx    
             #     best_sol = mov_node_pos.data
         logger = self.__logger__
-        numOvflNets, gr_wirelength, gr_numVias, gr_numShorts, rc_hor_mean, rc_ver_mean = best_gr_metrics
+        numOvflNets, gr_wirelength, gr_numVias, gr_numShorts, rc_hor_mean, rc_ver_mean = best_gr_metrics[:6]
         logger.info(
             "Select best GR solution in routability iteration %d: #OvflNets: %d, "
             "GR WL: %d, GR #Vias: %d, #EstShorts: %d, RC Hor: %.3f, RC Ver: %.3f" %
