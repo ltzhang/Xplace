@@ -424,6 +424,17 @@ def run_lg(node_pos: torch.Tensor, data: PlaceData, args, logger):
     # info = (-1, 0, data.design_name)
     # draw_fig_with_cairo_cpp(node_pos, data.node_size, data, info, args, base_size=4096)
 
+    # Report HPWL between the two legalization passes. Legalization as a WHOLE costs a median +9.1 %
+    # HPWL across the ORFS sweep (worst +44.5 % on bp_be_top) while DREAMPlace's equivalent costs
+    # nothing, but the combined `Finish Legalization` line could not say WHICH pass was responsible:
+    # Greedy has no displacement objective, Abacus does (abacus_legalize.cpp: `e` weights displacement
+    # and it accumulates |x - init_x|). Splitting the measurement here is what turns that from a
+    # hypothesis into a fact. Costs one commit_to_node_pos on an already-materialized layout.
+    commit_to_node_pos(node_pos, data, lg_rawdb)
+    torch.cuda.synchronize(node_pos.device)
+    logger.info("***** After Greedy Legalization, HPWL: %.6E *****" %
+                get_obj_hpwl(node_pos, data, args).item())
+
     logger.info("Start running Abacus Legalization...")
     al_time = time.time()
     gpudp.abacusLegalization(lg_rawdb, num_bins_x, num_bins_y)
