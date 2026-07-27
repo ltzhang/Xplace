@@ -1567,6 +1567,15 @@ int readDefComponentStart(defrCallbackType_e c, int num, defiUserData ud) {
 int readDefComponent(defrCallbackType_e c, defiComponent* co, defiUserData ud) {
     Database* db = (Database*)ud;
     CellType* celltype = db->getCellType(co->name());
+    if (!celltype) {
+        // A DEF that names a MACRO absent from every LEF read is not ingestible: the cell has no
+        // class, no size and no pins. Refuse the read loudly rather than dereference the null
+        // celltype below (that used to abort the whole embedding process mid-ingest, with no
+        // message naming the offending component). A non-zero callback return makes defrRead fail,
+        // which Database::readDEF reports and Database::load propagates.
+        logger.error("DEF COMPONENT %s references MACRO %s, which no LEF defines", co->id(), co->name());
+        return 1;
+    }
 
     string cellName(co->id());
     cellName = validate_token(cellName);
@@ -1910,12 +1919,20 @@ int readDefNet(defrCallbackType_e c, defiNet* dnet, defiUserData ud) {
             string pinname(dnet->pin(i));
             Cell* cell = db->getCell(cellname);
             if (!cell) {
-                logger.warning("Cell is not defined: %s", cellname.c_str());
+                // Same contract as the COMPONENT callback above: a net that connects to a component
+                // the DEF never declared cannot be built. Reject instead of dereferencing null.
+                string netName(dnet->name());
+                logger.error("DEF NET %s connects to undeclared COMPONENT %s", netName.c_str(), cellname.c_str());
+                return 1;
             }
             pin = cell->pin(pinname);
             if (!pin) {
                 string netName(dnet->name());
-                logger.warning("Pin is not defined: %s %s %s", netName.c_str(), cellname.c_str(), pinname.c_str());
+                logger.error("DEF NET %s connects to pin %s, which MACRO %s does not define",
+                             netName.c_str(),
+                             pinname.c_str(),
+                             cellname.c_str());
+                return 1;
             }
             if (pin->is_connected) {
                 string netName(dnet->name());

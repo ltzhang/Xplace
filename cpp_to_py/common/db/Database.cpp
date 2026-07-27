@@ -53,28 +53,34 @@ Database::~Database() {
     logger.info("destruct rawdb");
 }
 
-void Database::load() {
+bool Database::load() {
+    // A reader that fails leaves the database incomplete, so every result computed from it would be
+    // silently wrong. Record the first failure and report it to the caller instead of continuing
+    // (the readers themselves already log which file and which object rejected).
+    bool ok = true;
+    const auto require = [&ok](bool reader_ok) { ok = ok && reader_ok; return reader_ok; };
+
     // ----- design related options -----
 
     if (setting.BookshelfAux != "") {
         setting.Format = "bookshelf";
-        readBSAux(setting.BookshelfAux, setting.BookshelfPl);
+        require(readBSAux(setting.BookshelfAux, setting.BookshelfPl));
         def_read = true;
     }
 
     if (setting.LefFile != "") {
         setting.Format = "lefdef";
-        readLEF(setting.LefFile);
+        require(readLEF(setting.LefFile));
         lef_read = true;
     } else if ((setting.LefCell != "") && (setting.LefTech != "")) {
         setting.Format = "lefdef";
-        readLEF(setting.LefTech);
-        readLEF(setting.LefCell);
+        require(readLEF(setting.LefTech));
+        require(readLEF(setting.LefCell));
         lef_read = true;
     } else if (setting.LefFiles.size() > 0) {
         setting.Format = "lefdef";
         for (auto lef : setting.LefFiles) {
-            readLEF(lef);
+            require(readLEF(lef));
         }
         lef_read = true;
     }
@@ -118,25 +124,33 @@ void Database::load() {
 
     if (setting.DefFile != "") {
         setting.Format = "lefdef";
-        readDEF(setting.DefFile);
-        readDEFPG(setting.DefFile);
+        // Stop at the first DEF failure: readDEFPG re-scans the same file and would emit a second
+        // cascade of errors for an input already known to be unusable.
+        if (require(readDEF(setting.DefFile))) {
+            require(readDEFPG(setting.DefFile));
+        }
         def_read = true;
     }
 
     if (setting.Size != "") {
-        readSize(setting.Size);
+        require(readSize(setting.Size));
     }
 
     if (setting.Constraints != "") {
-        readConstraints(setting.Constraints);
+        require(readConstraints(setting.Constraints));
     }
 
     // verilog is unused now
     if (setting.Verilog != "") {
-        readVerilog_yy(setting.Verilog);
+        require(readVerilog_yy(setting.Verilog));
     }
 
+    if (!ok) {
+        logger.error("Failed to load rawdb: at least one input file was rejected (see errors above)");
+        return false;
+    }
     logger.info("Finish loading rawdb");
+    return true;
 }
 
 void Database::reset() {

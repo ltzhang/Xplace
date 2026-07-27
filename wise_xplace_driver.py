@@ -157,12 +157,24 @@ def place(lef_paths, in_def, out_def, util, site="", seed=0, deterministic=True,
             except (IndexError, TypeError, ValueError):
                 pass
         if route and route_metrics is not None:
-            try:  # columns: #OvflNets, GR WL, GR #Vias, GR EstShort, RC Hor, RC Ver
-                result["route"] = ("ovfl_nets=%s routed_wl=%s vias=%s est_short=%s"
+            # columns: #OvflNets, GR WL, GR #Vias, GR EstShort, RC Hor, RC Ver.
+            # ovfl_nets counts NETS touching an over-capacity gcell, against GGR's own capacity model
+            # (raw tracks, no derate, empirical via surcharge) — it is NOT an edge count and NOT
+            # comparable to OpenROAD GRT's congestion report. est_short and the ACE ratios rc_hor /
+            # rc_ver are the edge-level quantities, so report them alongside rather than letting the
+            # net count stand alone.
+            try:
+                result["route"] = ("ovfl_nets=%s routed_wl=%s vias=%s est_short=%s rc_hor=%s rc_ver=%s"
                                    % (route_metrics[0], route_metrics[1], route_metrics[2],
-                                      route_metrics[3]))
+                                      route_metrics[3], route_metrics[4], route_metrics[5]))
             except (IndexError, TypeError):
                 result["route"] = "routed (metrics unavailable)"
+            # Structured, so the caller never has to re-parse the human-readable summary to learn
+            # whether the route it just accepted still has unresolved congestion.
+            try:
+                result["ovfl_nets"] = int(route_metrics[0])
+            except (IndexError, TypeError, ValueError):
+                pass
         if route:
             # Per-net routed wirelength (DBU) exported by run_gr_and_fft next to the guide, for
             # route-accurate RC readback. DEF nets are named "n<WiseDB net index>"; return integer

@@ -193,7 +193,9 @@ public:
     void checkPlaceError();
     void checkDRCError();
 
-    void load();
+    /// Read every configured LEF/DEF/Liberty/Bookshelf input. Returns false if ANY reader failed;
+    /// the database is then incomplete and must not be set up or routed (the caller rejects).
+    bool load();
     void setup();  // call after read
     void reset();
     void save(const std::string& given_prefix);
