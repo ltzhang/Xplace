@@ -89,9 +89,14 @@ public:
         _global_log_level = value;
     }
 
+    // verbose_parser_log silences the parser's chatty DEBUG..WARN stream. It must NOT silence an
+    // ERROR or FATAL: those name the input object that was rejected, and a rejection nobody can
+    // read is indistinguishable from a crash.
+    static bool muted(int log_level) { return !verbose_parser_log && log_level < LOG_ERROR; }
+
     template <typename... Args>
     void log(int log_level, const char* format, Args&&... args) {
-        if (!verbose_parser_log) {
+        if (muted(log_level)) {
             return;
         }
         if (log_level >= _global_log_level) {
@@ -113,7 +118,7 @@ public:
     }
 
     void log(int log_level, const char* format) {
-        if (!verbose_parser_log) {
+        if (muted(log_level)) {
             return;
         }
         if (log_level >= _global_log_level) {

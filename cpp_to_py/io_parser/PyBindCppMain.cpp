@@ -135,7 +135,11 @@ std::tuple<std::shared_ptr<db::Database>, std::shared_ptr<gp::GPDatabase>> start
         throw std::invalid_argument("Received invalid params. Please check!");
     }
     auto rawdb_ptr = std::make_shared<db::Database>();
-    rawdb_ptr->load();
+    if (!rawdb_ptr->load()) {
+        // Never set up or route a partially-read database — that is how a rejected input turns into
+        // a plausible-looking but wrong result. Raise across the binding instead.
+        throw std::runtime_error("Failed to read the design: an input LEF/DEF was rejected. See the errors above.");
+    }
     rawdb_ptr->setup();
     auto gpdb_ptr = std::make_shared<gp::GPDatabase>(rawdb_ptr);
     gpdb_ptr->setup();
