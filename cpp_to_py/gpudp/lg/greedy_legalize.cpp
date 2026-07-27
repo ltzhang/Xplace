@@ -1,3 +1,5 @@
+#include <stdexcept>
+
 #include "gpudp/lg/legalization_db.h"
 
 namespace dp {
@@ -105,7 +107,27 @@ void distributeFixedCells2Bins(const LegalizationData& db,
     }
 }
 
-void distributeBlanks2Bins(const float* x,
+// One blank bin per PHYSICAL row. `blank_bin_id_y` is therefore a row index throughout this file:
+// on a uniform core that is the old `floorDiv(y - yl, row_height)` index unchanged, and on a
+// mixed-height core it is an index into the real row table, so a blank always carries the height of
+// the row it came from.
+void rowBinRangeForCellBin(const RowGrid& rows,
+                           float yl,
+                           int bin_id_y,
+                           int num_bins_y,
+                           float bin_size_y,
+                           int blank_num_bins_y,
+                           int* lo,
+                           int* hi) {
+    *lo = (bin_id_y == 0) ? 0 : rows.row_index_ceil(yl + bin_id_y * bin_size_y, 1e-3f);
+    *hi = (bin_id_y + 1 >= num_bins_y) ? blank_num_bins_y
+                                       : rows.row_index_ceil(yl + (bin_id_y + 1) * bin_size_y, 1e-3f);
+    *lo = std::min(std::max(*lo, 0), blank_num_bins_y);
+    *hi = std::min(std::max(*hi, *lo), blank_num_bins_y);
+}
+
+void distributeBlanks2Bins(const RowGrid& rows,
+                           const float* x,
                            const float* y,
                            const float* node_size_x,
                            const float* node_size_y,
@@ -126,34 +148,30 @@ void distributeBlanks2Bins(const float* x,
     for (int i = 0; i < num_bins_x * num_bins_y; i += 1) {
         int bin_id_x = i / num_bins_y;
         int bin_id_y = i - bin_id_x * num_bins_y;
-        int blank_num_bins_per_bin = roundDiv(bin_size_y, blank_bin_size_y);
-        int blank_bin_id_yl = bin_id_y * blank_num_bins_per_bin;
-        int blank_bin_id_yh = std::min(blank_bin_id_yl + blank_num_bins_per_bin, blank_num_bins_y);
+        int blank_bin_id_yl = 0, blank_bin_id_yh = 0;
+        rowBinRangeForCellBin(
+            rows, yl, bin_id_y, num_bins_y, bin_size_y, blank_num_bins_y, &blank_bin_id_yl, &blank_bin_id_yh);
         for (int blank_bin_id_y = blank_bin_id_yl; blank_bin_id_y < blank_bin_id_yh; ++blank_bin_id_y) {
             float bin_xl = xl + bin_id_x * bin_size_x;
             float bin_xh = std::min(bin_xl + bin_size_x, xh);
-            float bin_yl = yl + blank_bin_id_y * blank_bin_size_y;
-            float bin_yh = std::min(bin_yl + blank_bin_size_y, yh);
             int blank_bin_id = bin_id_x * blank_num_bins_y + blank_bin_id_y;
 
-            for (float by = bin_yl; by < bin_yh; by += row_height) {
-                Blank<float> blank;
-                blank.xl = floorDiv((bin_xl - xl), site_width) * site_width + xl;  // align blanks to sites
-                blank.xh = floorDiv((bin_xh - xl), site_width) * site_width + xl;  // align blanks to sites
-                blank.yl = by;
-                blank.yh = by + row_height;
+            Blank<float> blank;
+            blank.xl = floorDiv((bin_xl - xl), site_width) * site_width + xl;  // align blanks to sites
+            blank.xh = floorDiv((bin_xh - xl), site_width) * site_width + xl;  // align blanks to sites
+            blank.yl = rows.row_yl(blank_bin_id_y);
+            blank.yh = blank.yl + rows.row_height(blank_bin_id_y);
 
-                bin_blanks.at(blank_bin_id).push_back(blank);
-            }
+            bin_blanks.at(blank_bin_id).push_back(blank);
         }
     }
 
     for (int i = 0; i < num_bins_x * num_bins_y; i += 1) {
         int bin_id_x = i / num_bins_y;
         int bin_id_y = i - bin_id_x * num_bins_y;
-        int blank_num_bins_per_bin = roundDiv(bin_size_y, blank_bin_size_y);
-        int blank_bin_id_yl = bin_id_y * blank_num_bins_per_bin;
-        int blank_bin_id_yh = std::min(blank_bin_id_yl + blank_num_bins_per_bin, blank_num_bins_y);
+        int blank_bin_id_yl = 0, blank_bin_id_yh = 0;
+        rowBinRangeForCellBin(
+            rows, yl, bin_id_y, num_bins_y, bin_size_y, blank_num_bins_y, &blank_bin_id_yl, &blank_bin_id_yh);
 
         const std::vector<int>& cells = bin_fixed_cells.at(i);
 
@@ -167,8 +185,8 @@ void distributeBlanks2Bins(const float* x,
             // int node_2_blank_bin_id_yl = std::max(floorDiv((node_yl - yl), blank_bin_size_y), blank_bin_id_yl);
             // int node_2_blank_bin_id_yh = std::min(ceilDiv((node_yh - yl), blank_bin_size_y), blank_bin_id_yh);
 
-            int node_2_blank_bin_id_yl = std::max((node_yl - yl) / blank_bin_size_y, (float)blank_bin_id_yl);
-            int node_2_blank_bin_id_yh = std::min((int)ceil((node_yh - yl) / blank_bin_size_y), blank_bin_id_yh);
+            int node_2_blank_bin_id_yl = std::max(rows.row_index_floor(node_yl), blank_bin_id_yl);
+            int node_2_blank_bin_id_yh = std::min(rows.row_index_ceil(node_yh), blank_bin_id_yh);
 
             for (int blank_bin_id_y = node_2_blank_bin_id_yl; blank_bin_id_y < node_2_blank_bin_id_yh;
                  ++blank_bin_id_y) {
@@ -203,6 +221,7 @@ void distributeBlanks2Bins(const float* x,
 }
 
 void legalizeBin(
+    const RowGrid& rows,
     const float* init_x,
     const float* init_y,
     const float* node_size_x,
@@ -228,12 +247,13 @@ void legalizeBin(
     float gamma,   // a parameter to tune sort order
     bool lr_flag,  // from left to right
     int* num_unplaced_cells) {
+    const float min_row_height = rows.min_row_height();
     for (int i = 0; i < num_bins_x * num_bins_y; i += 1) {
         int bin_id_x = i / num_bins_y;
         int bin_id_y = i - bin_id_x * num_bins_y;
-        int blank_num_bins_per_bin = roundDiv(bin_size_y, blank_bin_size_y);
-        int blank_bin_id_yl = bin_id_y * blank_num_bins_per_bin;
-        int blank_bin_id_yh = std::min(blank_bin_id_yl + blank_num_bins_per_bin, blank_num_bins_y);
+        int blank_bin_id_yl = 0, blank_bin_id_yh = 0;
+        rowBinRangeForCellBin(
+            rows, yl, bin_id_y, num_bins_y, bin_size_y, blank_num_bins_y, &blank_bin_id_yl, &blank_bin_id_yh);
 
         // cells in this bin
         std::vector<int>& cells = bin_cells.at(i);
@@ -262,32 +282,42 @@ void legalizeBin(
             float width = ceilDiv(node_size_x[node_id], site_width) * site_width;
             float height = node_size_y[node_id];
 
-            int num_node_rows = ceilDiv(height, row_height);  // may take multiple rows
-            int blank_index_offset[num_node_rows];
-            std::fill(blank_index_offset, blank_index_offset + num_node_rows, 0);
+            // Upper bound on the rows this cell can occupy, used only to size the scratch arrays.
+            // The row it actually lands on decides the real span (`num_node_rows` below): on a
+            // mixed-height core a row whose height the cell cannot tile is skipped outright.
+            int max_node_rows = rows.max_rows_spanned(height);
+            int blank_index_offset[max_node_rows];
+            std::fill(blank_index_offset, blank_index_offset + max_node_rows, 0);
 
-            int blank_initial_bin_id_y = floorDiv((init_yl - yl), blank_bin_size_y);
+            int blank_initial_bin_id_y = rows.row_index_floor_tol(init_yl);
             blank_initial_bin_id_y = std::min(blank_bin_id_yh - 1, std::max(blank_bin_id_yl, blank_initial_bin_id_y));
             int blank_bin_id_dist_y = std::max(blank_initial_bin_id_y + 1, blank_bin_id_yh - blank_initial_bin_id_y);
 
             int best_blank_bin_id_y = -1;
-            int best_blank_bi[num_node_rows];
-            std::fill(best_blank_bi, best_blank_bi + num_node_rows, -1);
+            int best_num_node_rows = 0;
+            int best_blank_bi[max_node_rows];
+            std::fill(best_blank_bi, best_blank_bi + max_node_rows, -1);
             float best_cost = xh - xl + yh - yl;
             float best_xl = -1;
             float best_yl = -1;
             for (int bin_id_offset_y = 0; abs(bin_id_offset_y) < blank_bin_id_dist_y;
                  bin_id_offset_y = (bin_id_offset_y > 0) ? -bin_id_offset_y : -(bin_id_offset_y - 1)) {
                 int blank_bin_id_y = blank_initial_bin_id_y + bin_id_offset_y;
-                if (blank_bin_id_y < blank_bin_id_yl || blank_bin_id_y + num_node_rows > blank_bin_id_yh) {
+                if (blank_bin_id_y < blank_bin_id_yl) {
+                    continue;
+                }
+                // How many rows this cell occupies starting HERE. <= 0 means it cannot sit on this
+                // row at all (mixed-height core: wrong row height) -- skip, never round into it.
+                int num_node_rows = rows.rows_spanned(blank_bin_id_y, height);
+                if (num_node_rows <= 0 || blank_bin_id_y + num_node_rows > blank_bin_id_yh) {
                     continue;
                 }
                 int blank_bin_id = bin_id_x * blank_num_bins_y + blank_bin_id_y;
                 // blanks in this bin
                 const std::vector<Blank<float>>& blanks = bin_blanks.at(blank_bin_id);
 
-                int row_best_blank_bi[num_node_rows];
-                std::fill(row_best_blank_bi, row_best_blank_bi + num_node_rows, -1);
+                int row_best_blank_bi[max_node_rows];
+                std::fill(row_best_blank_bi, row_best_blank_bi + max_node_rows, -1);
                 float row_best_cost = xh - xl + yh - yl;
                 float row_best_xl = -1;
                 float row_best_yl = -1;
@@ -354,11 +384,12 @@ void legalizeBin(
                 }
                 if (row_best_cost < best_cost) {
                     best_blank_bin_id_y = blank_bin_id_y;
+                    best_num_node_rows = num_node_rows;
                     std::copy(row_best_blank_bi, row_best_blank_bi + num_node_rows, best_blank_bi);
                     best_cost = row_best_cost;
                     best_xl = row_best_xl;
                     best_yl = row_best_yl;
-                } else if (best_cost + row_height < bin_id_offset_y * row_height) {
+                } else if (best_cost + min_row_height < bin_id_offset_y * min_row_height) {
                     break;  // early exit since we iterate from close row to far-away row
                 }
             }
@@ -368,14 +399,14 @@ void legalizeBin(
                 x[node_id] = best_xl;
                 y[node_id] = best_yl;
                 // update cell position and blank
-                for (int row_offset = 0; row_offset < num_node_rows; ++row_offset) {
+                for (int row_offset = 0; row_offset < best_num_node_rows; ++row_offset) {
                     assert(best_blank_bi[row_offset] >= 0);
                     // blanks in this bin
                     int best_blank_bin_id = bin_id_x * blank_num_bins_y + best_blank_bin_id_y + row_offset;
                     std::vector<Blank<float>>& blanks = bin_blanks.at(best_blank_bin_id);
                     Blank<float>& blank = blanks.at(best_blank_bi[row_offset]);
                     assert(best_xl >= blank.xl && best_xl + width <= blank.xh);
-                    assert(best_yl + row_height * row_offset == blank.yl);
+                    assert(rows.row_yl(best_blank_bin_id_y + row_offset) == blank.yl);
                     if (best_xl == blank.xl) {
                         // update blank
                         blank.xl += width;
@@ -554,6 +585,37 @@ void minNodeSize(const std::vector<std::vector<int>>& bin_cells,
 void greedyLegalization(DPTorchRawDB& at_db, int num_bins_x, int num_bins_y, bool legalize_filler) {
     LegalizationData db(at_db);
     db.set_num_bins(num_bins_x, num_bins_y);
+    const RowGrid& rows = db.rows;
+    if (!rows.uniform()) {
+        // Loud pre-flight (rule: unsupported means rejection, never a plausible-looking placement).
+        // Every movable cell must be able to tile SOME row; one that cannot has no legal position on
+        // this floorplan at all, and the legalizer would otherwise silently leave it wherever global
+        // placement dropped it.
+        int num_unfittable = 0;
+        int first_unfittable = -1;
+        for (int id = 0; id < db.num_movable_nodes; ++id) {
+            if (db.is_mov_macro(id)) continue;
+            bool fits = false;
+            for (int r = 0; r < rows.num_rows() && !fits; ++r) fits = rows.rows_spanned(r, db.node_size_y[id]) > 0;
+            if (!fits) {
+                if (first_unfittable < 0) first_unfittable = id;
+                ++num_unfittable;
+            }
+        }
+        if (num_unfittable > 0) {
+            logger.error(
+                "mixed-height legalization: %d movable cells have a height no placement row can hold "
+                "(first: node %d, height %g; row heights %g..%g). Refusing to place them off-row.",
+                num_unfittable,
+                first_unfittable,
+                db.node_size_y[first_unfittable],
+                rows.min_row_height(),
+                rows.max_row_height());
+            throw std::runtime_error(
+                "mixed-height legalization: " + std::to_string(num_unfittable) +
+                " movable cells have a height that fits no placement row of this floorplan");
+        }
+    }
     // first from right to left
     // then from left to right
     float gamma = 1000.0;
@@ -572,9 +634,10 @@ void greedyLegalization(DPTorchRawDB& at_db, int num_bins_x, int num_bins_y, boo
         bin_size_y = std::max((float)(ceilDiv(bin_size_y, db.row_height) * db.row_height), db.row_height);
         num_bins_y = ceilDiv((db.yh - db.yl), bin_size_y);
 
-        // bin dimension in y direction for blanks is different from that for cells
+        // bin dimension in y direction for blanks is different from that for cells: one blank bin
+        // per physical row (on a uniform core that is exactly floorDiv(die height, row height)).
         float blank_bin_size_y = db.row_height;
-        int blank_num_bins_y = floorDiv((db.yh - db.yl), blank_bin_size_y);
+        int blank_num_bins_y = rows.num_rows();
         logger.debug("%s blank_num_bins_y = %d", "Standard cell legalization", blank_num_bins_y);
 
         // allocate bin cells
@@ -627,7 +690,8 @@ void greedyLegalization(DPTorchRawDB& at_db, int num_bins_x, int num_bins_y, boo
         std::vector<std::vector<Blank<float>>> bin_blanks_copy(num_bins_x * blank_num_bins_y);
 
         // distribute blanks to bins
-        distributeBlanks2Bins(db.init_x,
+        distributeBlanks2Bins(rows,
+                              db.init_x,
                               db.init_y,
                               db.node_size_x,
                               db.node_size_y,
@@ -656,7 +720,8 @@ void greedyLegalization(DPTorchRawDB& at_db, int num_bins_x, int num_bins_y, boo
             num_unplaced_cells_host = 0;
             logger.debug("%s #bin_blanks %d", "Standard cell legalization", countBinObjects(bin_blanks));
 
-            legalizeBin(db.init_x,
+            legalizeBin(rows,
+                        db.init_x,
                         db.init_y,
                         db.node_size_x,
                         db.node_size_y,

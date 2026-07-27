@@ -195,6 +195,15 @@ def setup_detailed_rawdb(
     num_nodes = node_lpos.shape[0] - num_iopin - num_floatiopin
     site_width = curr_site_width
     row_height = data.row_height / data.site_width
+    # Physical placement rows in the same prescaled system as die_info: raw DBU shifted by the core
+    # origin and divided by the site width. EMPTY on a single-height core -- the legalizers then use
+    # the classic uniform `row_height` grid and behave exactly as before.
+    row_yl, row_h = [], []
+    if data.has_mixed_height_rows:
+        shift_y = float(data.die_shift[1])
+        for y, h in data.mixed_height_rows:
+            row_yl.append((y - shift_y) / data.site_width)
+            row_h.append(h / data.site_width)
 
     if not use_cpu_db_ and not node_lpos.is_cuda:
         logger.error("Please set use_cpu_db == True when node_lpos is not on GPU")
@@ -226,6 +235,8 @@ def setup_detailed_rawdb(
             num_nodes,
             site_width,
             row_height,
+            row_yl,
+            row_h,
         )
     else:
         dp_rawdb = gpudp.create_dp_rawdb(
@@ -253,11 +264,18 @@ def setup_detailed_rawdb(
             num_nodes,
             site_width,
             row_height,
+            row_yl,
+            row_h,
         )
 
     num_sites_x = round((xh - xl) / site_width)
     num_sites_y = round((yh - yl) / row_height)
-    logger.info("Finish setup database. #siteX: %d #siteY: %d" % (num_sites_x, num_sites_y))
+    if row_yl:
+        logger.info("Finish setup database. #siteX: %d #rows: %d (mixed row heights %s)" % (
+            num_sites_x, len(row_yl), "/".join("%g" % h for h in sorted(set(row_h)))
+        ))
+    else:
+        logger.info("Finish setup database. #siteX: %d #siteY: %d" % (num_sites_x, num_sites_y))
 
     return dp_rawdb
 
@@ -453,8 +471,31 @@ def trace_ops(func, *args):
     # trace_ops(gpudp.kReorder, dp_rawdb, num_bins_x, num_bins_y, kr_K, kr_iter)
 
 
+def _decline_dp_on_mixed_rows(data: PlaceData, logger, what):
+    """True (and says so) when `what` must be skipped because the core has mixed row heights.
+
+    The GPU detailed-placement kernels (K-Reorder, Independent Set Matching, Global Swap, the
+    routing-aware refine) all index cells by `row_id = (y - yl) / row_height` and only ever consider
+    cells of exactly one row height. On a core that interleaves two row heights that indexing is
+    wrong for every taller cell, so the refinement would corrupt a legal placement. These passes are
+    pure wirelength refinement -- declining them loudly keeps the legalized placement intact, which
+    is the correct trade (a refused optimization, never a broken placement).
+    """
+    if not data.has_mixed_height_rows:
+        return False
+    logger.warning(
+        "%s declined: the core interleaves %d row heights and the detailed-placement kernels model a "
+        "single uniform row height. The legalized placement is kept as-is." % (
+            what, len(set(h for _, h in data.mixed_height_rows))
+        )
+    )
+    return True
+
+
 def run_dp(node_pos: torch.Tensor, data: PlaceData, args, logger):
     # GPU Detailed Placement
+    if _decline_dp_on_mixed_rows(data, logger, "Detailed placement"):
+        return node_pos
     dp_rawdb = setup_detailed_rawdb(node_pos, False, data, args, logger)
 
     num_bins_x = data.num_bin_x
@@ -508,6 +549,8 @@ def run_dp(node_pos: torch.Tensor, data: PlaceData, args, logger):
 
 def run_dp_local(node_pos: torch.Tensor, data: PlaceData, args, logger, displacement_ratio = 0.1):
     # GPU Detailed Placement
+    if _decline_dp_on_mixed_rows(data, logger, "Local detailed placement"):
+        return node_pos
     dp_rawdb = setup_detailed_rawdb(node_pos, False, data, args, logger)
 
     num_bins_x = data.num_bin_x
@@ -557,6 +600,8 @@ def run_dp_local(node_pos: torch.Tensor, data: PlaceData, args, logger, displace
 
 def run_dp_route_opt(node_pos: torch.Tensor, gpdb, rawdb, ps, data: PlaceData, args, logger):
     # NOTE: we suppose M1's prefer routing direction is 0 (horizontal)
+    if _decline_dp_on_mixed_rows(data, logger, "PA-Refine"):
+        return node_pos
     if ps.enable_route and gpdb.m1direction() == 0:
         func_name = "PA-Refine"
         logger.info("Start running %s" % func_name)

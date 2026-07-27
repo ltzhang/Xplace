@@ -28,7 +28,9 @@ DPTorchRawDB::DPTorchRawDB(torch::Tensor node_lpos_init_,
                            int num_movable_nodes_,
                            int num_nodes_,
                            float site_width_,
-                           float row_height_) {
+                           float row_height_,
+                           std::vector<float> row_yl_,
+                           std::vector<float> row_h_) {
     node_lpos_init = node_lpos_init_;
     node_size = node_size_;
     pin_rel_lpos = pin_rel_lpos_;
@@ -79,6 +81,17 @@ DPTorchRawDB::DPTorchRawDB(torch::Tensor node_lpos_init_,
 
     site_width = site_width_;
     row_height = row_height_;
+    row_yl_vec = std::move(row_yl_);
+    row_h_vec = std::move(row_h_);
+    if (row_yl_vec.size() != row_h_vec.size()) {
+        logger.error("placement row table is inconsistent (%d lower edges vs %d heights); "
+                     "falling back to the uniform %g row grid",
+                     static_cast<int>(row_yl_vec.size()),
+                     static_cast<int>(row_h_vec.size()),
+                     row_height_);
+        row_yl_vec.clear();
+        row_h_vec.clear();
+    }
     xl = xl_;
     xh = xh_;
     yl = yl_;
@@ -114,6 +127,8 @@ void DPTorchRawDB::scale(float scale_factor, bool use_round) {
         flat_region_boxes.mul_(scalar_at).round_();
         site_width = round(site_width * scale_factor);
         row_height = round(row_height * scale_factor);
+        for (float& v : row_yl_vec) v = std::round(v * scale_factor);
+        for (float& v : row_h_vec) v = std::round(v * scale_factor);
         xl = round(xl * scale_factor);
         xh = round(xh * scale_factor);
         yl = round(yl * scale_factor);
@@ -139,6 +154,8 @@ void DPTorchRawDB::scale(float scale_factor, bool use_round) {
         flat_region_boxes.div_(inv_scalar_at);
         site_width = site_width / inv_scale_factor;
         row_height = row_height / inv_scale_factor;
+        for (float& v : row_yl_vec) v /= inv_scale_factor;
+        for (float& v : row_h_vec) v /= inv_scale_factor;
         xl = xl / inv_scale_factor;
         xh = xh / inv_scale_factor;
         yl = yl / inv_scale_factor;

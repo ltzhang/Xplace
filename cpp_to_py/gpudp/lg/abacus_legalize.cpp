@@ -106,7 +106,8 @@ void sortNodesInRow(const float* host_x,
     }
 }
 
-void distributeMovableAndFixedCells2Bins(const float* x,
+void distributeMovableAndFixedCells2Bins(const RowGrid& rows,
+                                         const float* x,
                                          const float* y,
                                          const float* node_size_x,
                                          const float* node_size_y,
@@ -123,10 +124,20 @@ void distributeMovableAndFixedCells2Bins(const float* x,
                                          int num_movable_nodes,
                                          std::vector<std::vector<int>>& bin_cells) {
     for (int i = 0; i < num_nodes; i += 1) {
-        if (i < num_movable_nodes && roundDiv(node_size_y[i], bin_size_y) <= 1) {
+        // "Single row" must mean the SAME thing here and in abacusPlaceRowCPU below: a cell that
+        // exactly fills the one row it sits in. On a mixed-height core `roundDiv(height, shortest
+        // row height)` rounds a taller cell down to 1, which files a two-row-overlapping cell into a
+        // single bin -- the row it is missing from is then packed straight through it.
+        bool single_row = false;
+        if (i < num_movable_nodes) {
+            single_row = rows.uniform() ? (roundDiv(node_size_y[i], bin_size_y) <= 1)
+                                        : (rows.rows_spanned(rows.row_index_floor_tol(y[i]), node_size_y[i]) == 1);
+        }
+        if (single_row) {
             // single-row movable nodes only distribute to one bin
             int bin_id_x = (x[i] + node_size_x[i] / 2 - xl) / bin_size_x;
-            int bin_id_y = (y[i] + node_size_y[i] / 2 - yl) / bin_size_y;
+            int bin_id_y = rows.uniform() ? (int)((y[i] + node_size_y[i] / 2 - yl) / bin_size_y)
+                                          : rows.row_index_floor_tol(y[i]);
 
             bin_id_x = std::min(std::max(bin_id_x, 0), num_bins_x - 1);
             bin_id_y = std::min(std::max(bin_id_y, 0), num_bins_y - 1);
@@ -144,8 +155,8 @@ void distributeMovableAndFixedCells2Bins(const float* x,
             int node_id = i;
             int bin_id_xl = std::max(floorDiv(x[node_id] - xl, bin_size_x), 0);
             int bin_id_xh = std::min(ceilDiv(x[node_id] + node_size_x[node_id] - xl, bin_size_x), num_bins_x);
-            int bin_id_yl = std::max(floorDiv(y[node_id] - yl, bin_size_y), 0);
-            int bin_id_yh = std::min(ceilDiv(y[node_id] + node_size_y[node_id] - yl, bin_size_y), num_bins_y);
+            int bin_id_yl = std::max(rows.row_index_floor_tol(y[node_id]), 0);
+            int bin_id_yh = std::min(rows.row_index_ceil(y[node_id] + node_size_y[node_id], 1e-4f), num_bins_y);
 
             for (int bin_id_x = bin_id_xl; bin_id_x < bin_id_xh; ++bin_id_x) {
                 for (int bin_id_y = bin_id_yl; bin_id_y < bin_id_yh; ++bin_id_y) {
@@ -168,6 +179,7 @@ bool abacusPlaceRowCPU(const float* init_x,
                        const float* node_size_y,
                        float* x,
                        float row_height,
+                       bool mixed_height_rows,
                        float xl,
                        float xh,
                        int num_nodes,
@@ -175,6 +187,14 @@ bool abacusPlaceRowCPU(const float* init_x,
                        int* row_nodes,
                        AbacusCluster* clusters,
                        int num_row_nodes) {
+    // Which cells this row may slide. A uniform core keeps the historical "no taller than the row"
+    // rule. A mixed-height core demands an EXACT fit: a 7-track cell that happens to overlap a
+    // 9-track row is not this row's to move -- treat it as a blocker, exactly like a fixed cell.
+    auto row_movable = [&](int node_id) {
+        if (node_id >= num_movable_nodes) return false;
+        return mixed_height_rows ? (std::abs(node_size_y[node_id] - row_height) < 1e-6f)
+                                 : (node_size_y[node_id] <= row_height);
+    };
     // a very large number
     float M = std::pow(10, ceilDiv(std::log((xh - xl) * num_row_nodes), log(10)));
     bool ret_flag = true;
@@ -247,11 +267,11 @@ bool abacusPlaceRowCPU(const float* init_x,
         cluster.next_cluster_id = i + 1;
         cluster.bgn_row_node_id = i;
         cluster.end_row_node_id = i;
-        cluster.e = (node_id < num_movable_nodes && node_size_y[node_id] <= row_height) ? 1.0 : M;
+        cluster.e = row_movable(node_id) ? 1.0 : M;
         cluster.q = cluster.e * init_x[node_id];
         cluster.w = node_size_x[node_id];
         // this is required since we also include fixed nodes
-        cluster.x = (node_id < num_movable_nodes && node_size_y[node_id] > row_height) ? x[node_id] : init_x[node_id];
+        cluster.x = (node_id < num_movable_nodes && !row_movable(node_id)) ? x[node_id] : init_x[node_id];
     }
 
     // kernel algorithm for placeRow
@@ -294,7 +314,7 @@ bool abacusPlaceRowCPU(const float* init_x,
             float xc = cluster.x;
             for (int j = cluster.bgn_row_node_id; j <= cluster.end_row_node_id; ++j) {
                 int node_id = row_nodes[j];
-                if (node_id < num_movable_nodes && std::abs(node_size_y[node_id] - row_height) < 1e-6) {
+                if (row_movable(node_id) && std::abs(node_size_y[node_id] - row_height) < 1e-6) {
                     x[node_id] = xc;
                 } else if (xc != x[node_id]) {
                     if (node_id < num_movable_nodes)
@@ -317,7 +337,8 @@ bool abacusPlaceRowCPU(const float* init_x,
     return ret_flag;
 }
 
-void abacusLegalizeRow(const float* init_x,
+void abacusLegalizeRow(const RowGrid& rows,
+                       const float* init_x,
                        const float* node_size_x,
                        const float* node_size_y,
                        float* x,
@@ -342,7 +363,7 @@ void abacusLegalizeRow(const float* init_x,
         int num_row_nodes = row2nodes.size();
 
         int bin_id_x = i / num_bins_y;
-        // int bin_id_y = i-bin_id_x*num_bins_y;
+        int bin_id_y = i - bin_id_x * num_bins_y;
 
         float bin_xl = xl + bin_size_x * bin_id_x;
         float bin_xh = std::min(bin_xl + bin_size_x, xh);
@@ -351,7 +372,10 @@ void abacusLegalizeRow(const float* init_x,
                           node_size_x,
                           node_size_y,
                           x,
-                          bin_size_y,  // must be equal to row_height
+                          // this bin IS one row, so pass that row's own height -- a cell counts as
+                          // single-row (and is therefore movable within the row) only if it fills it
+                          rows.uniform() ? bin_size_y : rows.row_height(bin_id_y),
+                          !rows.uniform(),
                           bin_xl,
                           bin_xh,
                           num_nodes,
@@ -371,14 +395,16 @@ void abacusLegalization(DPTorchRawDB& at_db, int num_bins_x, int num_bins_y) {
     LegalizationData db(at_db);
     db.set_num_bins(num_bins_x, num_bins_y);
     // adjust bin sizes
+    const RowGrid& rows = db.rows;
     float bin_size_x = (db.xh - db.xl) / num_bins_x;
     float bin_size_y = db.row_height;
-    num_bins_y = ceilDiv(db.yh - db.yl, bin_size_y);
+    num_bins_y = rows.num_rows_incl_partial();  // one bin per row (uniform: ceilDiv as before)
 
     // include both movable and fixed nodes
     std::vector<std::vector<int>> bin_cells(num_bins_x * num_bins_y);
     // distribute cells to bins
-    distributeMovableAndFixedCells2Bins(db.x,
+    distributeMovableAndFixedCells2Bins(rows,
+                                        db.x,
                                         db.y,
                                         db.node_size_x,
                                         db.node_size_y,
@@ -400,7 +426,8 @@ void abacusLegalization(DPTorchRawDB& at_db, int num_bins_x, int num_bins_y) {
         bin_clusters[i].resize(bin_cells[i].size());
     }
 
-    abacusLegalizeRow(db.init_x,
+    abacusLegalizeRow(rows,
+                      db.init_x,
                       db.node_size_x,
                       db.node_size_y,
                       db.x,

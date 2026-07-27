@@ -1,6 +1,7 @@
 #pragma once
 
 #include "DatabaseClass.h"
+#include "PlaceRows.h"
 #include "Setting.h"
 #include "common/lib/Helper.h"
 
@@ -91,6 +92,12 @@ public:
     unsigned nSitesX = 0;
     unsigned nSitesY = 0;
 
+    // Physical placement rows derived from the DEF ROW records (see PlaceRows.h). On a
+    // single-height core this is the same uniform grid `siteH`/`nSitesY` already describe and
+    // nothing downstream consults it; on a core that interleaves two standard-cell row heights it
+    // is the ONLY faithful description of where a cell of a given height may legally sit.
+    PlaceRowTable placeRowTable;
+
     SiteMap* siteMap = nullptr;
     GCellGrid* gcellgrid = nullptr;
 
@@ -147,6 +154,7 @@ public:
     Layer* getRLayer(const int index);
     const Layer* getCLayer(const unsigned index) const;
     Layer* getLayer(const string& name);
+    Site* getSite(const string& name) const;
     CellType* getCellType(const string& name);
     Cell* getCell(const string& name);
     Net* getNet(const string& name);
@@ -225,6 +233,7 @@ private:
     void SetupLayers();
     void SetupCellLibrary();
     void SetupFloorplan();
+    void SetupPlaceRows();
     void SetupRegions();
     void SetupSiteMap();
     void SetupRows();

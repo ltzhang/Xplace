@@ -68,7 +68,9 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
              int num_movable_nodes_,
              int num_nodes_,
              float site_width_,
-             float row_height_) {
+             float row_height_,
+             std::vector<float> row_yl_,
+             std::vector<float> row_h_) {
               return std::make_shared<dp::DPTorchRawDB>(node_lpos_init_,
                                                         node_size_,
                                                         node_weight_,
@@ -92,8 +94,20 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
                                                         num_movable_nodes_,
                                                         num_nodes_,
                                                         site_width_,
-                                                        row_height_);
-          });
+                                                        row_height_,
+                                                        std::move(row_yl_),
+                                                        std::move(row_h_));
+          },
+          // The last two arguments are the physical placement-row table (bottom edges + heights) in
+          // the same prescaled coordinate system as yl/yh. Defaulted to empty = the classic uniform
+          // `row_height` grid, so every existing caller is unaffected.
+          py::arg("node_lpos_init"), py::arg("node_size"), py::arg("node_weight"), py::arg("is_macro"),
+          py::arg("pin_rel_lpos"), py::arg("pin_id2node_id"), py::arg("pin_id2net_id"), py::arg("node2pin_list"),
+          py::arg("node2pin_list_end"), py::arg("hyperedge_list"), py::arg("hyperedge_list_end"),
+          py::arg("net_mask"), py::arg("node_id2region_id"), py::arg("region_boxes"), py::arg("region_boxes_end"),
+          py::arg("xl"), py::arg("xh"), py::arg("yl"), py::arg("yh"), py::arg("num_conn_movable_nodes"),
+          py::arg("num_movable_nodes"), py::arg("num_nodes"), py::arg("site_width"), py::arg("row_height"),
+          py::arg("row_yl") = std::vector<float>{}, py::arg("row_h") = std::vector<float>{});
     m.def("macroLegalization", [](std::shared_ptr<dp::DPTorchRawDB> at_db_ptr, int num_bins_x, int num_bins_y) {
         return dp::macroLegalization(*at_db_ptr, num_bins_x, num_bins_y);
     });

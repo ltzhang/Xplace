@@ -2,6 +2,7 @@
 
 #include "common/common.h"
 #include "gpudp/db/dp_torch.h"
+#include "gpudp/lg/row_grid.h"
 
 namespace dp {
 
@@ -77,6 +78,7 @@ public:
           yh(at_db.yh),
           row_height(at_db.row_height),
           site_width(at_db.site_width),
+          rows(at_db.rows()),
           num_sites_x(at_db.num_sites_x),
           num_sites_y(at_db.num_sites_y),
           num_threads(at_db.num_threads),
@@ -124,8 +126,11 @@ public:
     /* row info */
     int num_sites_x;
     int num_sites_y;
-    float row_height;
+    float row_height;  // uniform row height, or the SHORTEST row height on a mixed-height core
     float site_width;
+    /* The authoritative row model. On a single-height core it reproduces the closed-form
+     * `row_height` arithmetic exactly; on a mixed-height core it carries every row's own height. */
+    RowGrid rows;
 
     int num_nets;
     int num_conn_movable_nodes;
@@ -152,10 +157,22 @@ public:
         return (node_id < num_movable_nodes && is_macro[node_id]);
     }
 
+    // Snap `y` down to the lower edge of a row that a cell of `height` can legally occupy.
+    // On a mixed-height core that means skipping down past rows whose height the cell cannot tile.
     inline float align2row(float y, float height) const {
         float yy = std::max(std::min(y, yh - height), yl);
-        yy = floorDiv(yy - yl, row_height) * row_height + yl;
-        return yy;
+        if (rows.uniform()) {
+            return floorDiv(yy - yl, row_height) * row_height + yl;
+        }
+        int r = rows.row_index_floor_tol(yy);
+        r = std::min(std::max(r, 0), rows.num_rows() - 1);
+        for (int i = r; i >= 0; --i) {
+            if (rows.rows_spanned(i, height) > 0) return rows.row_yl(i);
+        }
+        for (int i = r + 1; i < rows.num_rows(); ++i) {
+            if (rows.rows_spanned(i, height) > 0) return rows.row_yl(i);
+        }
+        return rows.row_yl(r);  // no row fits this height at all -- the legality check reports it
     }
 
     inline float align2site(float x, float width) const {

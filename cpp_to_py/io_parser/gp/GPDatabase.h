@@ -238,6 +238,11 @@ public:
     const std::tuple<int, int, int, int>& getCoreInfo() const { return coreInfo; }
     const int getSiteWidth() const { return siteW; }
     const int getSiteHeight() const { return siteH; }
+    // Physical placement rows as (bottom y, height) pairs in DBU, ascending. EMPTY on a
+    // single-height core -- the caller then keeps using the uniform siteHeight() grid, so nothing
+    // changes for the designs that have always worked. Non-empty only when the core genuinely
+    // interleaves two or more standard-cell row heights (see common/db/PlaceRows.h).
+    std::vector<std::pair<int, int>> getMixedHeightRows() const;
     const int getM1Direction() const;
     const int getMicrons() const { return microns; }
 

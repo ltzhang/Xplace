@@ -2,6 +2,7 @@
 
 #include <torch/extension.h>
 #include "common/common.h"
+#include "gpudp/lg/row_grid.h"
 
 namespace db {
 class Database;
@@ -34,7 +35,9 @@ public:
                  int num_movable_nodes_,
                  int num_nodes_,
                  float site_width_,
-                 float row_height_);
+                 float row_height_,
+                 std::vector<float> row_yl_ = {},
+                 std::vector<float> row_h_ = {});
     bool check(float scale_factor);
     void scale(float scale_factor, bool use_round);
     void commit();
@@ -101,6 +104,18 @@ public:
 
     float site_width;
     float row_height;
+
+    /* Physical placement rows. EMPTY on a single-height core, where `row_height` alone describes
+     * the grid exactly and every legalizer keeps its original closed-form arithmetic. Non-empty
+     * only for a core interleaving two or more row heights (see gpudp/lg/row_grid.h). */
+    std::vector<float> row_yl_vec;
+    std::vector<float> row_h_vec;
+
+    /* The row model every legalization / legality-check pass must go through. */
+    RowGrid rows() const {
+        return row_yl_vec.empty() ? RowGrid(yl, yh, row_height) : RowGrid(yl, yh, row_yl_vec, row_h_vec);
+    }
+    bool mixed_height_rows() const { return !row_yl_vec.empty(); }
 
     int num_threads;
 };

@@ -36,6 +36,8 @@ bool boundaryCheck(const float* x,
 
 bool siteAlignmentCheck(const float* x,
                         const float* y,
+                        const float* node_size_y,
+                        const RowGrid& rows,
                         const float site_width,
                         const float row_height,
                         const float scale_factor,
@@ -50,22 +52,42 @@ bool siteAlignmentCheck(const float* x,
         float node_xl = x[i];
         float node_yl = y[i];
 
-        float row_id_f = (node_yl - yl) / row_height;
-        int row_id = floorDiv(node_yl - yl, row_height, 1e-3);
-        float row_yl = yl + row_height * row_id;
-        float row_yh = row_yl + row_height;
+        int row_id = rows.row_index_floor_tol(node_yl, 1e-3f);
+        float row_yl = rows.uniform() ? yl + row_height * row_id
+                                      : (row_id >= 0 && row_id < rows.num_rows() ? rows.row_yl(row_id) : node_yl + 1);
+        float row_yh = row_yl + (rows.uniform() || row_id < 0 || row_id >= rows.num_rows() ? row_height
+                                                                                           : rows.row_height(row_id));
 
-        if (std::abs(row_id_f - row_id) > precision) {
-            logger.error("node %d (%g, %g) failed to align to row %d (%g, %g), gap %g, yl %g, row_height %g",
-                         i,
-                         node_xl,
-                         node_yl,
-                         row_id,
-                         row_yl,
-                         row_yh,
-                         std::abs(node_yl - row_yl),
-                         yl,
-                         row_height);
+        if (rows.uniform()) {
+            float row_id_f = (node_yl - yl) / row_height;
+            if (std::abs(row_id_f - row_id) > precision) {
+                logger.error("node %d (%g, %g) failed to align to row %d (%g, %g), gap %g, yl %g, row_height %g",
+                             i,
+                             node_xl,
+                             node_yl,
+                             row_id,
+                             row_yl,
+                             row_yh,
+                             std::abs(node_yl - row_yl),
+                             yl,
+                             row_height);
+                legal_flag = false;
+            }
+        } else if (!rows.aligned(node_yl, node_size_y[i])) {
+            // Mixed-height core. A cell is legal only when it sits on a row lower edge AND its own
+            // height is exactly tiled by that row (or a contiguous run of rows starting there) --
+            // i.e. a 9-track cell may only live in a 9-track row. Anything else is reported, never
+            // rounded into the nearest row.
+            logger.error(
+                "node %d (%g, %g) height %g does not fit any placement row: nearest row %d is (%g, %g) height %g",
+                i,
+                node_xl,
+                node_yl,
+                node_size_y[i],
+                row_id,
+                row_yl,
+                row_yh,
+                row_yh - row_yl);
             legal_flag = false;
         }
 
@@ -159,6 +181,7 @@ bool overlapCheck(const float* x,
                   const float* y,
                   const float* node_size_x,
                   const float* node_size_y,
+                  const RowGrid& rows,
                   float site_width,
                   float row_height,
                   float scale_factor,
@@ -169,7 +192,7 @@ bool overlapCheck(const float* x,
                   int num_nodes,
                   int num_movable_nodes) {
     bool legal_flag = true;
-    int num_rows = ceilDiv(yh - yl, row_height);
+    int num_rows = rows.num_rows_incl_partial();
     assert(num_rows > 0);
     std::vector<std::vector<int> > row_nodes(num_rows);
 
@@ -180,20 +203,18 @@ bool overlapCheck(const float* x,
     auto getYH = [&](int id) { return y[id] + node_size_y[id]; };
 
     auto getSiteXL = [&](float xx) { return int(floorDiv(xx - xl, site_width)); };
-    auto getSiteYL = [&](float yy) { return int(floorDiv(yy - yl, row_height)); };
     auto getSiteXH = [&](float xx) { return int(ceilDiv(xx - xl, site_width)); };
-    auto getSiteYH = [&](float yy) { return int(ceilDiv(yy - yl, row_height)); };
 
     // add a box to row
     auto addBox2Row = [&](int id, float bxl, float byl, float bxh, float byh) {
-        int row_idxl = floorDiv(byl - yl, row_height, 1e-3);
-        int row_idxh = ceilDiv(byh - yl, row_height, 1e-3);
+        int row_idxl = rows.row_index_floor_tol(byl, 1e-3f);
+        int row_idxh = rows.row_index_ceil(byh, 1e-3f);
         row_idxl = std::max(row_idxl, 0);
         row_idxh = std::min(row_idxh, num_rows);
 
         for (int row_id = row_idxl; row_id < row_idxh; ++row_id) {
-            float row_yl = yl + row_id * row_height;
-            float row_yh = row_yl + row_height;
+            float row_yl = rows.row_yl(row_id);
+            float row_yh = row_yl + rows.row_height(row_id);
 
             if (byl < row_yh && byh > row_yl)  // overlap with row
             {
@@ -273,8 +294,8 @@ bool overlapCheck(const float* x,
                             "row %d (%g, %g), overlap node %d (%g, %g, %g, %g) with "
                             "node %d (%g, %g, %g, %g) site (%d, %d), gap %g",
                             i,
-                            yl + i * row_height,
-                            yl + (i + 1) * row_height,
+                            rows.row_yl(i),
+                            rows.row_yl(i) + rows.row_height(i),
                             prev_node_id,
                             prev_xl,
                             prev_yl,
@@ -305,6 +326,7 @@ bool legalityCheckKernelCPU(const float* x,
                             const float* flat_region_boxes,
                             const int* flat_region_boxes_start,
                             const int* node2fence_region_map,
+                            const RowGrid& rows,
                             float xl,
                             float yl,
                             float xh,
@@ -316,10 +338,8 @@ bool legalityCheckKernelCPU(const float* x,
                             int num_regions,
                             float scale_factor) {
     bool legal_flag = true;
-    int num_rows = ceil((yh - yl) / row_height);
-    assert(num_rows > 0);
+    assert(rows.num_rows_incl_partial() > 0);
     fflush(stdout);
-    std::vector<std::vector<int> > row_nodes(num_rows);
 
     // check node within boundary
     if (!boundaryCheck(x, y, node_size_x, node_size_y, scale_factor, xl, yl, xh, yh, num_movable_nodes)) {
@@ -328,7 +348,8 @@ bool legalityCheckKernelCPU(const float* x,
     }
 
     // check row and site alignment
-    if (!siteAlignmentCheck(x, y, site_width, row_height, scale_factor, xl, yl, num_movable_nodes)) {
+    if (!siteAlignmentCheck(
+            x, y, node_size_y, rows, site_width, row_height, scale_factor, xl, yl, num_movable_nodes)) {
         legal_flag = false;
         std::cerr << "site alignment check error!" << std::endl;
     }
@@ -337,6 +358,7 @@ bool legalityCheckKernelCPU(const float* x,
                       y,
                       node_size_x,
                       node_size_y,
+                      rows,
                       site_width,
                       row_height,
                       scale_factor,
@@ -380,6 +402,7 @@ bool legalityCheck(DPTorchRawDB& at_db, float scale_factor) {
                                   at_db.flat_region_boxes.cpu().data_ptr<float>(),
                                   at_db.flat_region_boxes_start.cpu().data_ptr<int>(),
                                   at_db.node2fence_region_map.cpu().data_ptr<int>(),
+                                  at_db.rows(),
                                   at_db.xl,
                                   at_db.yl,
                                   at_db.xh,

@@ -1,3 +1,5 @@
+#include <stdexcept>
+
 #include "gpudp/lg/legalization_db.h"
 
 namespace dp {
@@ -21,6 +23,7 @@ struct FillerBlank {
 };
 
 void fixCells2Bins(const LegalizationData& db,
+                   const RowGrid& rows,
                    const float* x,
                    const float* y,
                    const float* node_size_x,
@@ -42,7 +45,9 @@ void fixCells2Bins(const LegalizationData& db,
     for (int i = 0; i < num_nodes; i += 1) {
         if (i < num_conn_movable_nodes || i >= num_movable_nodes) {
             int bin_id_x = (x[i] + node_size_x[i] / 2 - xl) / bin_size_x;
-            int bin_id_y = (y[i] + node_size_y[i] / 2 - yl) / bin_size_y;
+            // one bin per physical row: a cell belongs to the row its lower edge sits on
+            int bin_id_y = rows.uniform() ? (int)((y[i] + node_size_y[i] / 2 - yl) / bin_size_y)
+                                          : rows.row_index_floor_tol(y[i]);
 
             bin_id_x = std::min(std::max(bin_id_x, 0), num_bins_x - 1);
             bin_id_y = std::min(std::max(bin_id_y, 0), num_bins_y - 1);
@@ -63,7 +68,9 @@ void fixCells2Bins(const LegalizationData& db,
     }
 }
 
-void reduceBlanks(const float* x,
+void reduceBlanks(const RowGrid& rows,
+                  float filler_height,
+                  const float* x,
                   const float* y,
                   const float* node_size_x,
                   const float* node_size_y,
@@ -86,14 +93,19 @@ void reduceBlanks(const float* x,
 
         float bin_xl = xl + bin_id_x * bin_size_x;
         float bin_xh = std::min(bin_xl + bin_size_x, xh);
-        float bin_yl = yl + bin_id_y * bin_size_y;
-        float bin_yh = std::min(bin_yl + bin_size_y, yh);
+        float bin_yl = rows.uniform() ? yl + bin_id_y * bin_size_y : rows.row_yl(bin_id_y);
+        float bin_row_h = rows.uniform() ? row_height : rows.row_height(bin_id_y);
+
+        // A filler may only fill a row of ITS height. On a uniform core every row qualifies, so
+        // this is the historical behaviour; on a mixed-height core the rows a filler cannot fill
+        // simply offer no blank rather than being filled with a wrong-height cell.
+        if (std::abs(bin_row_h - filler_height) > 1e-6f) continue;
 
         FillerBlank<float> blank;
         blank.xl = floorDiv((bin_xl - xl), site_width) * site_width + xl;  // align blanks to sites
         blank.xh = floorDiv((bin_xh - xl), site_width) * site_width + xl;  // align blanks to sites
         blank.yl = bin_yl;
-        blank.yh = bin_yl + row_height;
+        blank.yh = bin_yl + bin_row_h;
 
         bin_blanks.at(bin_id).push_back(blank);
 
@@ -149,13 +161,20 @@ void reduceBlanks(const float* x,
 
 void fillerLegalization(DPTorchRawDB& at_db) {
     LegalizationData db(at_db);
+    const RowGrid& rows = db.rows;
 
     int num_blanks_x = 1;
     int num_bins_x = 1;
 
-    // bin dimension in y direction for blanks is different from that for cells
-    int num_blanks_y = floorDiv((db.yh - db.yl), db.row_height);
+    // bin dimension in y direction for blanks is different from that for cells: one per row
+    int num_blanks_y = rows.num_rows();
     int num_bins_y = num_blanks_y;
+
+    // Fillers are all one height. Take it from the first filler; with no fillers there is nothing
+    // to do and the height is irrelevant.
+    const int num_fillers = db.num_movable_nodes - db.num_conn_movable_nodes;
+    if (num_fillers <= 0) return;
+    const float filler_height = db.node_size_y[db.num_conn_movable_nodes];
     logger.info("%s num_blanks_y = %d", "Standard cell legalization", num_blanks_y);
 
     // adjust bin sizes
@@ -169,6 +188,7 @@ void fillerLegalization(DPTorchRawDB& at_db) {
 
     // distribute cells to bins
     fixCells2Bins(db,
+                  rows,
                   db.x,
                   db.y,
                   db.node_size_x,
@@ -187,7 +207,9 @@ void fillerLegalization(DPTorchRawDB& at_db) {
                   bin_cells);
 
     // distribute blanks to bins
-    reduceBlanks(db.x,
+    reduceBlanks(rows,
+                 filler_height,
+                 db.x,
                  db.y,
                  db.node_size_x,
                  db.node_size_y,
@@ -217,6 +239,14 @@ void fillerLegalization(DPTorchRawDB& at_db) {
         }
     }
     logger.info("%s maxDegree = %d", "Blanks", maxDegree);
+    if (maxDegree <= 0) {
+        // No blank can hold a filler. Refuse rather than spin the bucket-list walk below off the
+        // bottom of the map (which has no lower bound of its own).
+        logger.error("filler legalization: %d fillers of height %g but no usable blank row",
+                     num_fillers,
+                     filler_height);
+        throw std::runtime_error("filler legalization: no placement row can hold a filler cell");
+    }
 
     // sorted filler cell id
     std::vector<int> fillers_to_blank(db.num_movable_nodes - db.num_conn_movable_nodes);

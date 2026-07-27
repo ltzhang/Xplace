@@ -158,6 +158,9 @@ class IOParser(object):
         siteWidth = gpdb.siteWidth()
         siteHeight = gpdb.siteHeight()
         site_info = (float(siteWidth), float(siteHeight))
+        # Physical placement rows (bottom y, height) in DBU. EMPTY unless the core interleaves two or
+        # more standard-cell row heights -- a single-height core keeps using the siteHeight grid.
+        mixed_height_rows = [(float(y), float(h)) for y, h in gpdb.mixed_height_rows()]
 
         node_pos = gpdb.node_cpos_tensor()
         node_lpos = gpdb.node_lpos_tensor()
@@ -217,6 +220,7 @@ class IOParser(object):
             "connected_index": connected_index,
             "fixed_index": fixed_index,
             "site_info": site_info,
+            "mixed_height_rows": mixed_height_rows,
             "die_info": die_info,
             "node_pos": node_pos.contiguous(),
             "node_lpos": node_lpos.contiguous(),

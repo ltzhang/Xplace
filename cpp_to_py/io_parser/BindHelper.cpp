@@ -58,6 +58,7 @@ void bindGPDatabase(pybind11::module& m) {
         .def("coreInfo", &gp::GPDatabase::getCoreInfo, py::return_value_policy::copy)  // coreLX, coreHX, coreLY, coreHY
         .def("siteWidth", &gp::GPDatabase::getSiteWidth, py::return_value_policy::copy)
         .def("siteHeight", &gp::GPDatabase::getSiteHeight, py::return_value_policy::copy)
+        .def("mixed_height_rows", &gp::GPDatabase::getMixedHeightRows, py::return_value_policy::copy)
         .def("m1direction", &gp::GPDatabase::getM1Direction, py::return_value_policy::copy)
         .def("node_type_indices", &gp::GPDatabase::getNodeTypeIndices, py::return_value_policy::copy)
         .def("node_id2node_name", &gp::GPDatabase::getNodeId2NodeName, py::return_value_policy::copy)

@@ -347,6 +347,17 @@ void Database::SetupFloorplan() {
         coreHY = std::max(row->y() + siteH, coreHY);
     }
 
+    // Derive the physical row table before SetupRows() replaces `rows` with a uniform grid. On a
+    // single-height core the table is that same uniform grid, so nothing below changes. Only a core
+    // that genuinely interleaves two or more row heights takes the mixed-height path.
+    SetupPlaceRows();
+    if (placeRowTable.mixed()) {
+        // The tallest rows reach above coreLY + k*siteH, so the uniform-height core top truncates
+        // them. Take the real top edge instead, otherwise the top rows fall outside the placeable
+        // die and their cells are pushed down onto rows of the wrong height.
+        coreHY = std::max(coreHY, placeRowTable.yh());
+    }
+
     for (Site* lefsite : lefsites) {
         if (lefsite->siteClassName() == "CORE") {
             if (siteW != (unsigned)lefsite->width()) {
@@ -367,6 +378,47 @@ void Database::SetupFloorplan() {
     nSitesY = (coreHY - coreLY) / siteH;
     if (!maxDisp) {
         maxDisp = nSitesX;
+    }
+}
+
+/*
+Physical placement rows (PlaceRows.h). Each DEF ROW record names a SITE; the SITE's LEF height is
+that row's real height. A row whose SITE is unknown falls back to the uniform `siteH`, so a
+bookshelf design or a DEF without SITE definitions behaves exactly as before.
+*/
+void Database::SetupPlaceRows() {
+    placeRowTable = PlaceRowTable();
+    if (rows.empty()) return;
+
+    std::vector<PlaceRow> records;
+    records.reserve(rows.size());
+    for (const Row* row : rows) {
+        const Site* site = getSite(row->macro());
+        const int h = (site && site->height() > 0) ? site->height() : siteH;
+        records.emplace_back(row->y(), h, row->orient(), row->flip());
+    }
+
+    placeRowTable = buildPlaceRowTable(records);
+    if (placeRowTable.rejected()) {
+        // Loud: we understood the ROW records well enough to know we do NOT understand them.
+        // The uniform grid stays in force, which is correct for every single-height floorplan and
+        // is the only model the rest of the placer has; a mixed-height core in this state will be
+        // caught again by the legalizer's row-alignment check rather than silently misplaced.
+        logger.error("placement rows are not a consistent tiling (%s); falling back to the uniform %d-DBU row grid",
+                     placeRowTable.message.c_str(),
+                     siteH);
+    } else if (placeRowTable.mixed()) {
+        int min_h = placeRowTable.rows.front().h;
+        int max_h = min_h;
+        for (const PlaceRow& r : placeRowTable.rows) {
+            min_h = std::min(min_h, r.h);
+            max_h = std::max(max_h, r.h);
+        }
+        logger.info("mixed-height core: %d placement rows, row height %d..%d DBU (uniform grid would use %d)",
+                    static_cast<int>(placeRowTable.rows.size()),
+                    min_h,
+                    max_h,
+                    siteH);
     }
 }
 
@@ -495,12 +547,15 @@ void Database::SetupSiteMap() {
     // mark all sites blocked
     siteMap->setSites(coreLX, coreLY, coreHX, coreHY, SiteMap::SiteBlocked);
 
-    // mark rows as non-blocked
+    // mark rows as non-blocked. Use each row's OWN height: on a mixed-height core the taller rows
+    // reach above `siteH` and their top slice would otherwise stay marked blocked.
     for (const Row* row : rows) {
+        const Site* site = getSite(row->macro());
+        const int row_h = (placeRowTable.mixed() && site && site->height() > 0) ? site->height() : siteH;
         int lx = row->x();
         int ly = row->y();
         int hx = row->x() + row->width();
-        int hy = row->y() + siteH;
+        int hy = row->y() + row_h;
         siteMap->unsetSites(lx, ly, hx, hy, SiteMap::SiteBlocked);
     }
 
@@ -593,6 +648,33 @@ void Database::SetupSiteMap() {
 }
 
 void Database::SetupRows() {
+    // Mixed-height core: the uniform `nSitesY` grid below cannot represent these rows at all (two
+    // rows of different heights would map to the same grid index, or to none). Rebuild `rows`
+    // straight from the validated placement-row table so every entry is a REAL row carrying its own
+    // y, height and orientation -- which is what cell orientation assignment then reads.
+    if (placeRowTable.mixed()) {
+        const int stepX = (coreHX - coreLX) / nSitesX;
+        for (Row*& row : rows) {
+            delete row;
+            row = nullptr;
+        }
+        rows.clear();
+        rows.reserve(placeRowTable.rows.size());
+        for (size_t i = 0; i < placeRowTable.rows.size(); ++i) {
+            const PlaceRow& pr = placeRowTable.rows[i];
+            Row* row = new Row("core_SITE_ROW_" + std::to_string(i), "core", coreLX, pr.y);
+            row->xStep(stepX);
+            row->yStep(0);
+            row->xNum(nSitesX);
+            row->yNum(1);
+            row->flip(pr.flip);
+            row->orient(pr.orient);
+            powerNet->getRowPower(pr.y, pr.y + pr.h, row->_topPower, row->_botPower);
+            rows.push_back(row);
+        }
+        return;
+    }
+
     // verify row flipping conflict
     bool flipCheckPass = true;
     std::vector<char> flip(nSitesY, 0);
@@ -779,6 +861,13 @@ Layer& Database::addLayer(const string& name, const char type) {
         newlayer.cIndex = c;
     }
     return newlayer;
+}
+
+Site* Database::getSite(const string& name) const {
+    for (Site* site : lefsites) {
+        if (site->name() == name) return site;
+    }
+    return nullptr;
 }
 
 Site* Database::addSite(const string& name, const string& siteClassName, const int w, const int h) {

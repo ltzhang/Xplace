@@ -881,6 +881,14 @@ torch::Tensor GPDatabase::getPartialBlockageDensity() {
     return dens;
 }
 
+std::vector<std::pair<int, int>> GPDatabase::getMixedHeightRows() const {
+    std::vector<std::pair<int, int>> out;
+    if (!database.placeRowTable.mixed()) return out;  // uniform core: caller keeps the siteH grid
+    out.reserve(database.placeRowTable.rows.size());
+    for (const db::PlaceRow& r : database.placeRowTable.rows) out.emplace_back(r.y, r.h);
+    return out;
+}
+
 void GPDatabase::applyOneNodeOrient(int node_id) {
     auto& node = nodes[node_id];
 
@@ -890,6 +898,15 @@ void GPDatabase::applyOneNodeOrient(int node_id) {
         rowId = 0;
     } else if (node.getLy() >= database.coreHY) {
         rowId = numRows - 1;
+    } else if (database.placeRowTable.mixed()) {
+        // Mixed-height core: rows are NOT on a uniform siteH pitch, so the row a cell sits in has to
+        // be looked up in the real row table (database.rows mirrors it entry-for-entry). Dividing by
+        // siteH here would hand the cell a neighbouring row's orientation and flip its power rails.
+        const auto& prows = database.placeRowTable.rows;
+        auto it = std::upper_bound(
+            prows.begin(), prows.end(), node.getLy(), [](int y, const db::PlaceRow& r) { return y < r.y; });
+        rowId = static_cast<int>(it - prows.begin()) - 1;
+        rowId = std::max(std::min(rowId, numRows - 1), 0);
     } else {
         rowId = std::lround((node.getLy() - database.coreLY) / (float)siteH);
         rowId = std::max(std::min(rowId, numRows - 1), 0);

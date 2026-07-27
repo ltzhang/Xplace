@@ -72,6 +72,7 @@ class PlaceData(object):
         benchmark=None,
         die_info=None,
         site_info=None,
+        mixed_height_rows=None,
         node_type_indices=None,
         node_id2node_name=None,
         node_id2celltype_name=None,
@@ -147,6 +148,11 @@ class PlaceData(object):
         self.__site_width__ = site_info[0]
         self.__site_height__ = site_info[1]
         self.__row_height__ = site_info[1]  # the same as site height
+        # Physical placement rows as [(bottom y, height), ...] in raw DBU, ascending. EMPTY on a
+        # single-height core, where __row_height__ alone describes the grid exactly. Non-empty only
+        # for a core that interleaves two or more standard-cell row heights, which no single scalar
+        # row height can express: legalization then has to place each cell in a row of ITS height.
+        self.__mixed_height_rows__ = list(mixed_height_rows) if mixed_height_rows else []
 
         lx, hx, ly, hy = die_info.cpu().numpy()
         self.__ori_die_lx__ = lx
@@ -267,6 +273,15 @@ class PlaceData(object):
     def row_height(self):
         if hasattr(self, "__row_height__"):
             return self.__row_height__
+
+    @property
+    def mixed_height_rows(self):
+        """[(row bottom y, row height), ...] in raw DBU, or [] on a single-height core."""
+        return getattr(self, "__mixed_height_rows__", [])
+
+    @property
+    def has_mixed_height_rows(self):
+        return len(self.mixed_height_rows) > 0
 
     @property
     def ori_die_lx(self):
